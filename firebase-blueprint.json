@@ -1,0 +1,335 @@
+{
+  "entities": {
+    "AdminRecord": {
+      "title": "AdminRecord",
+      "description": "Authorized institute administrator record keyed by Firebase Auth UID.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Firebase Auth UID of the administrator" },
+        "email": { "type": "string", "description": "Administrator verified email" },
+        "name": { "type": "string", "description": "Administrator display name" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp on creation" }
+      },
+      "required": ["uid", "email", "name", "createdAt"]
+    },
+    "UserAccount": {
+      "title": "UserAccount",
+      "description": "Authenticated user account linking Google Sign-In identity to institute role and profile.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "photoUrl": { "type": "string" },
+        "role": { "type": "string", "enum": ["ADMIN", "TEACHER", "STUDENT"] },
+        "instituteCode": { "type": "string" },
+        "linkedProfileId": { "type": "string" },
+        "active": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "displayName", "role", "active", "createdAt", "updatedAt"]
+    },
+    "PortalClaim": {
+      "title": "PortalClaim",
+      "description": "Non-PII institute ID passcode claim allowing teachers or students to bind their Google account.",
+      "type": "object",
+      "properties": {
+        "code": { "type": "string" },
+        "role": { "type": "string", "enum": ["TEACHER", "STUDENT"] },
+        "profileId": { "type": "string" },
+        "passcode": { "type": "string" },
+        "claimedByUid": { "type": "string" },
+        "active": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["code", "role", "profileId", "passcode", "active", "createdAt", "updatedAt"]
+    },
+    "TeacherProfile": {
+      "title": "TeacherProfile",
+      "description": "Institute faculty record managed by Super Admin.",
+      "type": "object",
+      "properties": {
+        "teacherCode": { "type": "string" },
+        "name": { "type": "string" },
+        "email": { "type": "string" },
+        "phone": { "type": "string" },
+        "subjectSpecialty": { "type": "string" },
+        "passcode": { "type": "string" },
+        "linkedUid": { "type": "string" },
+        "active": { "type": "boolean" },
+        "demoRecord": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["teacherCode", "name", "email", "subjectSpecialty", "passcode", "active", "demoRecord", "createdAt", "updatedAt"]
+    },
+    "StudentProfile": {
+      "title": "StudentProfile",
+      "description": "Institute student record with batch, course, and assigned teacher mapping.",
+      "type": "object",
+      "properties": {
+        "studentCode": { "type": "string" },
+        "name": { "type": "string" },
+        "email": { "type": "string" },
+        "phone": { "type": "string" },
+        "photoUrl": { "type": "string" },
+        "course": { "type": "string" },
+        "batch": { "type": "string" },
+        "assignedTeacherId": { "type": "string" },
+        "assignedTeacherUid": { "type": "string" },
+        "assignedTeacherName": { "type": "string" },
+        "passcode": { "type": "string" },
+        "linkedUid": { "type": "string" },
+        "active": { "type": "boolean" },
+        "demoRecord": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["studentCode", "name", "course", "batch", "passcode", "active", "demoRecord", "createdAt", "updatedAt"]
+    },
+    "PdfPaper": {
+      "title": "PdfPaper",
+      "description": "Uploaded or bundled PDF question paper source metadata.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "fileName": { "type": "string" },
+        "subject": { "type": "string" },
+        "chapter": { "type": "string" },
+        "topic": { "type": "string" },
+        "totalExtracted": { "type": "integer" },
+        "approvedCount": { "type": "integer" },
+        "sourceType": { "type": "string", "enum": ["BUNDLED_SET", "UPLOADED_PDF"] },
+        "uploadedByUid": { "type": "string" },
+        "status": { "type": "string", "enum": ["PENDING_REVIEW", "APPROVED"] },
+        "demoRecord": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "fileName", "subject", "totalExtracted", "approvedCount", "sourceType", "uploadedByUid", "status", "demoRecord", "createdAt", "updatedAt"]
+    },
+    "BankQuestion": {
+      "title": "BankQuestion",
+      "description": "Centralized question bank item (Admin-managed, never readable by students directly).",
+      "type": "object",
+      "properties": {
+        "questionText": { "type": "string" },
+        "questionType": { "type": "string", "enum": ["MCQ", "MULTI_SELECT", "TRUE_FALSE", "FILL_BLANK", "SHORT_ANSWER"] },
+        "options": { "type": "array" },
+        "correctAnswers": { "type": "array" },
+        "explanation": { "type": "string" },
+        "subject": { "type": "string" },
+        "chapter": { "type": "string" },
+        "topic": { "type": "string" },
+        "difficulty": { "type": "string", "enum": ["EASY", "MEDIUM", "HARD"] },
+        "marks": { "type": "number" },
+        "sourcePaperId": { "type": "string" },
+        "answerApproved": { "type": "boolean" },
+        "createdByUid": { "type": "string" },
+        "demoRecord": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["questionText", "questionType", "options", "correctAnswers", "subject", "difficulty", "marks", "answerApproved", "createdByUid", "demoRecord", "createdAt", "updatedAt"]
+    },
+    "Examination": {
+      "title": "Examination",
+      "description": "Scheduled online examination containing sanitized student-safe questions without answer keys.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "subject": { "type": "string" },
+        "batch": { "type": "string" },
+        "status": { "type": "string", "enum": ["DRAFT", "PUBLISHED", "ARCHIVED"] },
+        "durationMinutes": { "type": "integer" },
+        "totalMarks": { "type": "number" },
+        "marksPerQuestion": { "type": "number" },
+        "negativeMarks": { "type": "number" },
+        "passingPercentage": { "type": "number" },
+        "scheduledAtMillis": { "type": "integer" },
+        "deadlineAtMillis": { "type": "integer" },
+        "randomizeQuestions": { "type": "boolean" },
+        "randomizeOptions": { "type": "boolean" },
+        "showResultImmediately": { "type": "boolean" },
+        "allowAnswerReview": { "type": "boolean" },
+        "assignedScope": { "type": "string", "enum": ["ALL", "BATCH", "STUDENTS"] },
+        "assignedStudentIds": { "type": "array" },
+        "assignedStudentUids": { "type": "array" },
+        "assignedTeacherUid": { "type": "string" },
+        "createdByUid": { "type": "string" },
+        "questionCount": { "type": "integer" },
+        "questions": { "type": "array" },
+        "demoRecord": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "subject", "status", "durationMinutes", "totalMarks", "marksPerQuestion", "negativeMarks", "passingPercentage", "randomizeQuestions", "randomizeOptions", "showResultImmediately", "allowAnswerReview", "assignedScope", "assignedStudentIds", "assignedStudentUids", "createdByUid", "questionCount", "questions", "demoRecord", "createdAt", "updatedAt"]
+    },
+    "ExamAnswerKey": {
+      "title": "ExamAnswerKey",
+      "description": "Protected official answer key for an examination; inaccessible to students until their attempt is terminally SUBMITTED.",
+      "type": "object",
+      "properties": {
+        "examId": { "type": "string" },
+        "answers": { "type": "object" },
+        "explanations": { "type": "object" },
+        "marksPerQuestion": { "type": "number" },
+        "negativeMarks": { "type": "number" },
+        "passingPercentage": { "type": "number" },
+        "createdByUid": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["examId", "answers", "marksPerQuestion", "negativeMarks", "passingPercentage", "createdByUid", "createdAt", "updatedAt"]
+    },
+    "ExamAttempt": {
+      "title": "ExamAttempt",
+      "description": "Student in-progress or terminally submitted examination session keyed as examId_studentUid.",
+      "type": "object",
+      "properties": {
+        "examId": { "type": "string" },
+        "examTitle": { "type": "string" },
+        "studentUid": { "type": "string" },
+        "studentId": { "type": "string" },
+        "studentName": { "type": "string" },
+        "assignedTeacherUid": { "type": "string" },
+        "status": { "type": "string", "enum": ["IN_PROGRESS", "SUBMITTED"] },
+        "responses": { "type": "object" },
+        "flaggedQuestionIds": { "type": "array" },
+        "currentQuestionIndex": { "type": "integer" },
+        "startedAtMillis": { "type": "integer" },
+        "submittedAtMillis": { "type": "integer" },
+        "timeTakenSeconds": { "type": "integer" },
+        "demoRecord": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["examId", "examTitle", "studentUid", "studentName", "status", "responses", "flaggedQuestionIds", "currentQuestionIndex", "startedAtMillis", "timeTakenSeconds", "demoRecord", "createdAt", "updatedAt"]
+    },
+    "ExamResult": {
+      "title": "ExamResult",
+      "description": "Evaluated examination result with full question-wise answer breakdown keyed as examId_studentUid.",
+      "type": "object",
+      "properties": {
+        "examId": { "type": "string" },
+        "examTitle": { "type": "string" },
+        "subject": { "type": "string" },
+        "batch": { "type": "string" },
+        "studentUid": { "type": "string" },
+        "studentId": { "type": "string" },
+        "studentCode": { "type": "string" },
+        "studentName": { "type": "string" },
+        "assignedTeacherId": { "type": "string" },
+        "assignedTeacherUid": { "type": "string" },
+        "assignedTeacherName": { "type": "string" },
+        "totalQuestions": { "type": "integer" },
+        "correctCount": { "type": "integer" },
+        "wrongCount": { "type": "integer" },
+        "unattemptedCount": { "type": "integer" },
+        "pendingManualCount": { "type": "integer" },
+        "totalMarks": { "type": "number" },
+        "obtainedMarks": { "type": "number" },
+        "percentage": { "type": "number" },
+        "passed": { "type": "boolean" },
+        "timeTakenSeconds": { "type": "integer" },
+        "resultsVisibleToStudent": { "type": "boolean" },
+        "allowAnswerReview": { "type": "boolean" },
+        "gradingStatus": { "type": "string", "enum": ["AUTO_GRADED", "PENDING_REVIEW", "FINALIZED"] },
+        "questionAnalyses": { "type": "array" },
+        "demoRecord": { "type": "boolean" },
+        "submittedAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["examId", "examTitle", "subject", "studentUid", "studentName", "totalQuestions", "correctCount", "wrongCount", "unattemptedCount", "pendingManualCount", "totalMarks", "obtainedMarks", "percentage", "passed", "timeTakenSeconds", "resultsVisibleToStudent", "allowAnswerReview", "gradingStatus", "questionAnalyses", "demoRecord", "submittedAt", "updatedAt"]
+    },
+    "NotificationItem": {
+      "title": "NotificationItem",
+      "description": "Targeted notification for student, teacher, or admin events.",
+      "type": "object",
+      "properties": {
+        "recipientUid": { "type": "string" },
+        "senderUid": { "type": "string" },
+        "title": { "type": "string" },
+        "message": { "type": "string" },
+        "category": { "type": "string", "enum": ["EXAM_ASSIGNED", "RESULT_PUBLISHED", "EXAM_SUBMITTED", "SYSTEM"] },
+        "relatedExamId": { "type": "string" },
+        "read": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["recipientUid", "senderUid", "title", "message", "category", "read", "createdAt"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Append-only security and administration audit trail.",
+      "type": "object",
+      "properties": {
+        "actorUid": { "type": "string" },
+        "actorEmail": { "type": "string" },
+        "actorRole": { "type": "string", "enum": ["ADMIN", "TEACHER", "STUDENT"] },
+        "action": { "type": "string" },
+        "targetType": { "type": "string" },
+        "targetId": { "type": "string" },
+        "details": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["actorUid", "actorEmail", "actorRole", "action", "targetType", "targetId", "details", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/admins/{uid}": {
+      "schema": { "$ref": "#/entities/AdminRecord" },
+      "description": "Additional institute Super Administrators keyed by Auth UID."
+    },
+    "/users/{uid}": {
+      "schema": { "$ref": "#/entities/UserAccount" },
+      "description": "Authenticated user account and role bindings keyed by Auth UID."
+    },
+    "/portal_claims/{code}": {
+      "schema": { "$ref": "#/entities/PortalClaim" },
+      "description": "Non-PII teacher/student ID claim tokens for portal binding."
+    },
+    "/teachers/{teacherId}": {
+      "schema": { "$ref": "#/entities/TeacherProfile" },
+      "description": "Institute teachers managed by Admin."
+    },
+    "/students/{studentId}": {
+      "schema": { "$ref": "#/entities/StudentProfile" },
+      "description": "Institute students with batch, course, and teacher assignment."
+    },
+    "/pdf_papers/{paperId}": {
+      "schema": { "$ref": "#/entities/PdfPaper" },
+      "description": "Uploaded and bundled PDF question paper metadata."
+    },
+    "/questions/{questionId}": {
+      "schema": { "$ref": "#/entities/BankQuestion" },
+      "description": "Centralized Admin question bank with official answers."
+    },
+    "/examinations/{examId}": {
+      "schema": { "$ref": "#/entities/Examination" },
+      "description": "Published and draft examinations containing sanitized questions without answer keys."
+    },
+    "/exam_answer_keys/{examId}": {
+      "schema": { "$ref": "#/entities/ExamAnswerKey" },
+      "description": "Protected official answer keys unlocked for a student only after attempt submission."
+    },
+    "/exam_attempts/{attemptId}": {
+      "schema": { "$ref": "#/entities/ExamAttempt" },
+      "description": "Student exam session progress and terminal submission lock."
+    },
+    "/exam_results/{resultId}": {
+      "schema": { "$ref": "#/entities/ExamResult" },
+      "description": "Evaluated examination results and question-wise analyses."
+    },
+    "/notifications/{notificationId}": {
+      "schema": { "$ref": "#/entities/NotificationItem" },
+      "description": "Targeted notifications for students, teachers, and admins."
+    },
+    "/audit_logs/{logId}": {
+      "schema": { "$ref": "#/entities/AuditLog" },
+      "description": "Immutable audit log entries for institute activity monitoring."
+    }
+  }
+}

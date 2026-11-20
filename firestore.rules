@@ -1,0 +1,632 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Default-Deny Safety Net (Pillar 4.1)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ==================== GLOBAL HARDENED HELPERS ====================
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidTimestamp(ts) {
+      return ts is timestamp && ts <= request.time;
+    }
+
+    // Bootstrapped Super Admin check (no DB lookup — safe in list queries, strictly requires verified email)
+    function isBootstrappedAdmin() {
+      return isSignedIn() &&
+             request.auth.token.email_verified == true &&
+             request.auth.token.email == 'aghanghas08@gmail.com';
+    }
+
+    // Full Admin check for single-document get/write operations
+    function isAdmin() {
+      return isBootstrappedAdmin() ||
+             (isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)));
+    }
+
+    function isOptionalString(data, field, maxLen) {
+      return !(field in data) || data[field] == null || (data[field] is string && data[field].size() <= maxLen);
+    }
+
+    function isValidString(val, minLen, maxLen) {
+      return val is string && val.size() >= minLen && val.size() <= maxLen;
+    }
+
+    function isBoundedStringList(val, maxItems) {
+      return val is list && val.size() <= maxItems && (val.size() == 0 || val[0] is string);
+    }
+
+    function isBoundedMapList(val, maxItems) {
+      return val is list && val.size() <= maxItems && (val.size() == 0 || val[0] is map);
+    }
+
+    // ==================== VALIDATION BLUEPRINTS ====================
+
+    function isValidAdminRecord(data) {
+      return isValidString(data.uid, 1, 128) &&
+             isValidString(data.email, 3, 160) &&
+             isValidString(data.name, 1, 100) &&
+             isValidTimestamp(data.createdAt);
+    }
+
+    function isValidUserAccount(data) {
+      return isValidString(data.uid, 1, 128) &&
+             isValidString(data.email, 3, 160) &&
+             isValidString(data.displayName, 1, 120) &&
+             isOptionalString(data, 'photoUrl', 600) &&
+             data.role in ['ADMIN', 'TEACHER', 'STUDENT'] &&
+             isOptionalString(data, 'instituteCode', 64) &&
+             isOptionalString(data, 'linkedProfileId', 128) &&
+             data.active is bool &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidPortalClaim(data) {
+      return isValidString(data.code, 2, 64) &&
+             data.role in ['TEACHER', 'STUDENT'] &&
+             isValidString(data.profileId, 1, 128) &&
+             isValidString(data.passcode, 4, 64) &&
+             isOptionalString(data, 'claimedByUid', 128) &&
+             data.active is bool &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidTeacherProfile(data) {
+      return isValidString(data.teacherCode, 2, 64) &&
+             isValidString(data.name, 1, 120) &&
+             isValidString(data.email, 3, 160) &&
+             isOptionalString(data, 'phone', 32) &&
+             isValidString(data.subjectSpecialty, 1, 120) &&
+             isValidString(data.passcode, 4, 64) &&
+             isOptionalString(data, 'linkedUid', 128) &&
+             data.active is bool &&
+             data.demoRecord is bool &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidStudentProfile(data) {
+      return isValidString(data.studentCode, 2, 64) &&
+             isValidString(data.name, 1, 120) &&
+             isOptionalString(data, 'email', 160) &&
+             isOptionalString(data, 'phone', 32) &&
+             isOptionalString(data, 'photoUrl', 600) &&
+             isValidString(data.course, 1, 120) &&
+             isValidString(data.batch, 1, 80) &&
+             isOptionalString(data, 'assignedTeacherId', 128) &&
+             isOptionalString(data, 'assignedTeacherUid', 128) &&
+             isOptionalString(data, 'assignedTeacherName', 120) &&
+             isValidString(data.passcode, 4, 64) &&
+             isOptionalString(data, 'linkedUid', 128) &&
+             data.active is bool &&
+             data.demoRecord is bool &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidPdfPaper(data) {
+      return isValidString(data.title, 1, 200) &&
+             isValidString(data.fileName, 1, 200) &&
+             isValidString(data.subject, 1, 100) &&
+             isOptionalString(data, 'chapter', 120) &&
+             isOptionalString(data, 'topic', 120) &&
+             data.totalExtracted is int && data.totalExtracted >= 0 && data.totalExtracted <= 2000 &&
+             data.approvedCount is int && data.approvedCount >= 0 && data.approvedCount <= 2000 &&
+             data.sourceType in ['BUNDLED_SET', 'UPLOADED_PDF'] &&
+             isValidString(data.uploadedByUid, 1, 128) &&
+             data.status in ['PENDING_REVIEW', 'APPROVED'] &&
+             data.demoRecord is bool &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidBankQuestion(data) {
+      return isValidString(data.questionText, 1, 2000) &&
+             data.questionType in ['MCQ', 'MULTI_SELECT', 'TRUE_FALSE', 'FILL_BLANK', 'SHORT_ANSWER'] &&
+             isBoundedStringList(data.options, 10) &&
+             isBoundedStringList(data.correctAnswers, 10) &&
+             isOptionalString(data, 'explanation', 2000) &&
+             isValidString(data.subject, 1, 100) &&
+             isOptionalString(data, 'chapter', 120) &&
+             isOptionalString(data, 'topic', 120) &&
+             data.difficulty in ['EASY', 'MEDIUM', 'HARD'] &&
+             data.marks is number && data.marks > 0 && data.marks <= 100 &&
+             isOptionalString(data, 'sourcePaperId', 128) &&
+             data.answerApproved is bool &&
+             isValidString(data.createdByUid, 1, 128) &&
+             data.demoRecord is bool &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidExamination(data) {
+      return isValidString(data.title, 1, 200) &&
+             isOptionalString(data, 'description', 1000) &&
+             isValidString(data.subject, 1, 100) &&
+             isOptionalString(data, 'batch', 80) &&
+             data.status in ['DRAFT', 'PUBLISHED', 'ARCHIVED'] &&
+             data.durationMinutes is int && data.durationMinutes >= 1 && data.durationMinutes <= 480 &&
+             data.totalMarks is number && data.totalMarks > 0 && data.totalMarks <= 10000 &&
+             data.marksPerQuestion is number && data.marksPerQuestion > 0 && data.marksPerQuestion <= 100 &&
+             data.negativeMarks is number && data.negativeMarks >= 0 && data.negativeMarks <= 50 &&
+             data.passingPercentage is number && data.passingPercentage >= 0 && data.passingPercentage <= 100 &&
+             (!('scheduledAtMillis' in data) || data.scheduledAtMillis is int) &&
+             (!('deadlineAtMillis' in data) || data.deadlineAtMillis is int) &&
+             data.randomizeQuestions is bool &&
+             data.randomizeOptions is bool &&
+             data.showResultImmediately is bool &&
+             data.allowAnswerReview is bool &&
+             data.assignedScope in ['ALL', 'BATCH', 'STUDENTS'] &&
+             isBoundedStringList(data.assignedStudentIds, 500) &&
+             isBoundedStringList(data.assignedStudentUids, 500) &&
+             isOptionalString(data, 'assignedTeacherUid', 128) &&
+             isValidString(data.createdByUid, 1, 128) &&
+             data.questionCount is int && data.questionCount >= 1 && data.questionCount <= 200 &&
+             isBoundedMapList(data.questions, 200) &&
+             data.demoRecord is bool &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidExamAnswerKey(data) {
+      return isValidString(data.examId, 1, 128) &&
+             data.answers is map && data.answers.size() <= 200 &&
+             (!('explanations' in data) || data.explanations == null || (data.explanations is map && data.explanations.size() <= 200)) &&
+             data.marksPerQuestion is number && data.marksPerQuestion > 0 && data.marksPerQuestion <= 100 &&
+             data.negativeMarks is number && data.negativeMarks >= 0 && data.negativeMarks <= 50 &&
+             data.passingPercentage is number && data.passingPercentage >= 0 && data.passingPercentage <= 100 &&
+             isValidString(data.createdByUid, 1, 128) &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidExamAttempt(data) {
+      return isValidString(data.examId, 1, 128) &&
+             isValidString(data.examTitle, 1, 200) &&
+             isValidString(data.studentUid, 1, 128) &&
+             isOptionalString(data, 'studentId', 128) &&
+             isValidString(data.studentName, 1, 120) &&
+             isOptionalString(data, 'assignedTeacherUid', 128) &&
+             data.status in ['IN_PROGRESS', 'SUBMITTED'] &&
+             data.responses is map && data.responses.size() <= 200 &&
+             isBoundedStringList(data.flaggedQuestionIds, 200) &&
+             data.currentQuestionIndex is int && data.currentQuestionIndex >= 0 && data.currentQuestionIndex <= 200 &&
+             data.startedAtMillis is int && data.startedAtMillis > 0 &&
+             (!('submittedAtMillis' in data) || data.submittedAtMillis == null || data.submittedAtMillis is int) &&
+             data.timeTakenSeconds is int && data.timeTakenSeconds >= 0 && data.timeTakenSeconds <= 86400 &&
+             data.demoRecord is bool &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidExamResult(data) {
+      return isValidString(data.examId, 1, 128) &&
+             isValidString(data.examTitle, 1, 200) &&
+             isValidString(data.subject, 1, 100) &&
+             isOptionalString(data, 'batch', 80) &&
+             isValidString(data.studentUid, 1, 128) &&
+             isOptionalString(data, 'studentId', 128) &&
+             isOptionalString(data, 'studentCode', 64) &&
+             isValidString(data.studentName, 1, 120) &&
+             isOptionalString(data, 'assignedTeacherId', 128) &&
+             isOptionalString(data, 'assignedTeacherUid', 128) &&
+             isOptionalString(data, 'assignedTeacherName', 120) &&
+             data.totalQuestions is int && data.totalQuestions >= 1 && data.totalQuestions <= 200 &&
+             data.correctCount is int && data.correctCount >= 0 && data.correctCount <= 200 &&
+             data.wrongCount is int && data.wrongCount >= 0 && data.wrongCount <= 200 &&
+             data.unattemptedCount is int && data.unattemptedCount >= 0 && data.unattemptedCount <= 200 &&
+             data.pendingManualCount is int && data.pendingManualCount >= 0 && data.pendingManualCount <= 200 &&
+             data.totalMarks is number && data.totalMarks > 0 && data.totalMarks <= 10000 &&
+             data.obtainedMarks is number && data.obtainedMarks >= -5000 && data.obtainedMarks <= 10000 &&
+             data.percentage is number && data.percentage >= 0 && data.percentage <= 100 &&
+             data.passed is bool &&
+             data.timeTakenSeconds is int && data.timeTakenSeconds >= 0 && data.timeTakenSeconds <= 86400 &&
+             data.resultsVisibleToStudent is bool &&
+             data.allowAnswerReview is bool &&
+             data.gradingStatus in ['AUTO_GRADED', 'PENDING_REVIEW', 'FINALIZED'] &&
+             isBoundedMapList(data.questionAnalyses, 200) &&
+             data.demoRecord is bool &&
+             isValidTimestamp(data.submittedAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidNotification(data) {
+      return isValidString(data.recipientUid, 1, 128) &&
+             isValidString(data.senderUid, 1, 128) &&
+             isValidString(data.title, 1, 160) &&
+             isValidString(data.message, 1, 800) &&
+             data.category in ['EXAM_ASSIGNED', 'RESULT_PUBLISHED', 'EXAM_SUBMITTED', 'SYSTEM'] &&
+             isOptionalString(data, 'relatedExamId', 128) &&
+             data.read is bool &&
+             isValidTimestamp(data.createdAt);
+    }
+
+    function isValidAuditLog(data) {
+      return isValidString(data.actorUid, 1, 128) &&
+             isValidString(data.actorEmail, 3, 160) &&
+             data.actorRole in ['ADMIN', 'TEACHER', 'STUDENT'] &&
+             isValidString(data.action, 1, 100) &&
+             isValidString(data.targetType, 1, 64) &&
+             isValidString(data.targetId, 1, 128) &&
+             isValidString(data.details, 1, 500) &&
+             isValidTimestamp(data.createdAt);
+    }
+
+    // ==================== COLLECTION RULES ====================
+
+    // 1. Admins registry
+    match /admins/{uid} {
+      allow get: if isSignedIn() && isValidId(uid) && (request.auth.uid == uid || isAdmin());
+      allow list: if isBootstrappedAdmin();
+      allow create: if isSignedIn() && isValidId(uid) && isAdmin() &&
+                       incoming().keys().hasAll(['uid', 'email', 'name', 'createdAt']) &&
+                       incoming().keys().hasOnly(['uid', 'email', 'name', 'createdAt']) &&
+                       incoming().uid == uid &&
+                       isValidAdminRecord(incoming());
+      allow update: if false;
+      allow delete: if isSignedIn() && isValidId(uid) && isBootstrappedAdmin();
+    }
+
+    // 2. Users (PII isolated to owner or Admin)
+    match /users/{uid} {
+      allow get: if isSignedIn() && isValidId(uid) && (request.auth.uid == uid || isAdmin());
+      allow list: if isBootstrappedAdmin();
+
+      allow create: if isSignedIn() && isValidId(uid) &&
+                       incoming().keys().hasAll(['uid', 'email', 'displayName', 'role', 'active', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['uid', 'email', 'displayName', 'photoUrl', 'role', 'instituteCode', 'linkedProfileId', 'active', 'createdAt', 'updatedAt']) &&
+                       isValidUserAccount(incoming()) &&
+                       (
+                         isAdmin() ||
+                         (request.auth.uid == uid && incoming().uid == request.auth.uid && incoming().role == 'STUDENT' && incoming().active == true)
+                       );
+
+      allow update: if isSignedIn() && isValidId(uid) && isValidUserAccount(incoming()) &&
+                       incoming().uid == existing().uid &&
+                       incoming().createdAt == existing().createdAt &&
+                       (
+                         isAdmin() ||
+                         (
+                           request.auth.uid == uid &&
+                           incoming().role == existing().role &&
+                           incoming().active == existing().active &&
+                           incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoUrl', 'updatedAt'])
+                         ) ||
+                         // Action: Claim verified teacher/student institute portal code
+                         (
+                           request.auth.uid == uid &&
+                           incoming().role in ['TEACHER', 'STUDENT'] &&
+                           incoming().active == existing().active &&
+                           incoming().diff(existing()).affectedKeys().hasOnly(['role', 'instituteCode', 'linkedProfileId', 'updatedAt']) &&
+                           exists(/databases/$(database)/documents/portal_claims/$(incoming().instituteCode)) &&
+                           get(/databases/$(database)/documents/portal_claims/$(incoming().instituteCode)).data.active == true &&
+                           get(/databases/$(database)/documents/portal_claims/$(incoming().instituteCode)).data.role == incoming().role &&
+                           get(/databases/$(database)/documents/portal_claims/$(incoming().instituteCode)).data.profileId == incoming().linkedProfileId &&
+                           get(/databases/$(database)/documents/portal_claims/$(incoming().instituteCode)).data.claimedByUid == request.auth.uid
+                         )
+                       );
+
+      allow delete: if isSignedIn() && isValidId(uid) && isAdmin();
+    }
+
+    // 3. Portal Claims (Single-doc exact-code lookup; no list scraping)
+    match /portal_claims/{code} {
+      allow get: if isSignedIn() && isValidId(code);
+      allow list: if isBootstrappedAdmin();
+      allow create: if isSignedIn() && isValidId(code) && isAdmin() &&
+                       incoming().keys().hasAll(['code', 'role', 'profileId', 'passcode', 'active', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['code', 'role', 'profileId', 'passcode', 'claimedByUid', 'active', 'createdAt', 'updatedAt']) &&
+                       incoming().code == code &&
+                       isValidPortalClaim(incoming());
+      allow update: if isSignedIn() && isValidId(code) && isValidPortalClaim(incoming()) &&
+                       incoming().code == existing().code &&
+                       incoming().createdAt == existing().createdAt &&
+                       (
+                         isAdmin() ||
+                         // Action: User claims an unclaimed active portal code
+                         (
+                           existing().active == true &&
+                           (!('claimedByUid' in existing()) || existing().claimedByUid == null || existing().claimedByUid == '' || existing().claimedByUid == request.auth.uid) &&
+                           incoming().claimedByUid == request.auth.uid &&
+                           incoming().diff(existing()).affectedKeys().hasOnly(['claimedByUid', 'updatedAt'])
+                         )
+                       );
+      allow delete: if isSignedIn() && isValidId(code) && isAdmin();
+    }
+
+    // 4. Teachers (PII isolated to Admin & linked teacher)
+    match /teachers/{teacherId} {
+      allow get: if isSignedIn() && isValidId(teacherId) &&
+                    (isAdmin() || existing().linkedUid == request.auth.uid);
+      allow list: if isBootstrappedAdmin() ||
+                     (isSignedIn() && resource.data.linkedUid == request.auth.uid);
+      allow create: if isSignedIn() && isValidId(teacherId) && isAdmin() &&
+                       incoming().keys().hasAll(['teacherCode', 'name', 'email', 'subjectSpecialty', 'passcode', 'active', 'demoRecord', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['teacherCode', 'name', 'email', 'phone', 'subjectSpecialty', 'passcode', 'linkedUid', 'active', 'demoRecord', 'createdAt', 'updatedAt']) &&
+                       isValidTeacherProfile(incoming());
+      allow update: if isSignedIn() && isValidId(teacherId) && isValidTeacherProfile(incoming()) &&
+                       incoming().createdAt == existing().createdAt &&
+                       (
+                         isAdmin() ||
+                         // Action: Claim teacher profile after verifying portal_claim
+                         (
+                           (!('linkedUid' in existing()) || existing().linkedUid == null || existing().linkedUid == '' || existing().linkedUid == request.auth.uid) &&
+                           incoming().linkedUid == request.auth.uid &&
+                           incoming().diff(existing()).affectedKeys().hasOnly(['linkedUid', 'updatedAt']) &&
+                           exists(/databases/$(database)/documents/portal_claims/$(existing().teacherCode)) &&
+                           get(/databases/$(database)/documents/portal_claims/$(existing().teacherCode)).data.claimedByUid == request.auth.uid &&
+                           get(/databases/$(database)/documents/portal_claims/$(existing().teacherCode)).data.profileId == teacherId
+                         )
+                       );
+      allow delete: if isSignedIn() && isValidId(teacherId) && isAdmin();
+    }
+
+    // 5. Students (Isolated to Admin, Assigned Teacher, or the Student themselves)
+    match /students/{studentId} {
+      allow get: if isSignedIn() && isValidId(studentId) &&
+                    (isAdmin() || existing().assignedTeacherUid == request.auth.uid || existing().linkedUid == request.auth.uid);
+      allow list: if isBootstrappedAdmin() ||
+                     (isSignedIn() && (resource.data.assignedTeacherUid == request.auth.uid || resource.data.linkedUid == request.auth.uid));
+      allow create: if isSignedIn() && isValidId(studentId) && isAdmin() &&
+                       incoming().keys().hasAll(['studentCode', 'name', 'course', 'batch', 'passcode', 'active', 'demoRecord', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['studentCode', 'name', 'email', 'phone', 'photoUrl', 'course', 'batch', 'assignedTeacherId', 'assignedTeacherUid', 'assignedTeacherName', 'passcode', 'linkedUid', 'active', 'demoRecord', 'createdAt', 'updatedAt']) &&
+                       isValidStudentProfile(incoming());
+      allow update: if isSignedIn() && isValidId(studentId) && isValidStudentProfile(incoming()) &&
+                       incoming().createdAt == existing().createdAt &&
+                       (
+                         isAdmin() ||
+                         // Action: Student updates own profile photo or phone only
+                         (
+                           existing().linkedUid == request.auth.uid &&
+                           incoming().diff(existing()).affectedKeys().hasOnly(['photoUrl', 'phone', 'updatedAt'])
+                         ) ||
+                         // Action: Student binds their Google account via verified portal_claim
+                         (
+                           (!('linkedUid' in existing()) || existing().linkedUid == null || existing().linkedUid == '' || existing().linkedUid == request.auth.uid) &&
+                           incoming().linkedUid == request.auth.uid &&
+                           incoming().diff(existing()).affectedKeys().hasOnly(['linkedUid', 'updatedAt']) &&
+                           exists(/databases/$(database)/documents/portal_claims/$(existing().studentCode)) &&
+                           get(/databases/$(database)/documents/portal_claims/$(existing().studentCode)).data.claimedByUid == request.auth.uid &&
+                           get(/databases/$(database)/documents/portal_claims/$(existing().studentCode)).data.profileId == studentId
+                         )
+                       );
+      allow delete: if isSignedIn() && isValidId(studentId) && isAdmin();
+    }
+
+    // 6. PDF Question Papers (Admin-only)
+    match /pdf_papers/{paperId} {
+      allow get: if isSignedIn() && isValidId(paperId) && isAdmin();
+      allow list: if isBootstrappedAdmin();
+      allow create: if isSignedIn() && isValidId(paperId) && isAdmin() &&
+                       incoming().uploadedByUid == request.auth.uid &&
+                       incoming().keys().hasAll(['title', 'fileName', 'subject', 'totalExtracted', 'approvedCount', 'sourceType', 'uploadedByUid', 'status', 'demoRecord', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['title', 'fileName', 'subject', 'chapter', 'topic', 'totalExtracted', 'approvedCount', 'sourceType', 'uploadedByUid', 'status', 'demoRecord', 'createdAt', 'updatedAt']) &&
+                       isValidPdfPaper(incoming());
+      allow update: if isSignedIn() && isValidId(paperId) && isValidPdfPaper(incoming()) &&
+                       incoming().uploadedByUid == existing().uploadedByUid &&
+                       incoming().createdAt == existing().createdAt &&
+                       isAdmin();
+      allow delete: if isSignedIn() && isValidId(paperId) && isAdmin();
+    }
+
+    // 7. Centralized Question Bank (Admin-only — NEVER exposed to students)
+    match /questions/{questionId} {
+      allow get: if isSignedIn() && isValidId(questionId) && isAdmin();
+      allow list: if isBootstrappedAdmin();
+      allow create: if isSignedIn() && isValidId(questionId) && isAdmin() &&
+                       incoming().createdByUid == request.auth.uid &&
+                       incoming().keys().hasAll(['questionText', 'questionType', 'options', 'correctAnswers', 'subject', 'difficulty', 'marks', 'answerApproved', 'createdByUid', 'demoRecord', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['questionText', 'questionType', 'options', 'correctAnswers', 'explanation', 'subject', 'chapter', 'topic', 'difficulty', 'marks', 'sourcePaperId', 'answerApproved', 'createdByUid', 'demoRecord', 'createdAt', 'updatedAt']) &&
+                       isValidBankQuestion(incoming());
+      allow update: if isSignedIn() && isValidId(questionId) && isValidBankQuestion(incoming()) &&
+                       incoming().createdByUid == existing().createdByUid &&
+                       incoming().createdAt == existing().createdAt &&
+                       isAdmin();
+      allow delete: if isSignedIn() && isValidId(questionId) && isAdmin();
+    }
+
+    // 8. Examinations (Sanitized questions without answer keys)
+    match /examinations/{examId} {
+      allow get: if isSignedIn() && isValidId(examId) && (
+                    isAdmin() ||
+                    existing().assignedTeacherUid == request.auth.uid ||
+                    existing().createdByUid == request.auth.uid ||
+                    (existing().status == 'PUBLISHED' && (existing().assignedScope == 'ALL' || request.auth.uid in existing().assignedStudentUids))
+                  );
+      allow list: if isBootstrappedAdmin() ||
+                     (isSignedIn() && (
+                       resource.data.assignedTeacherUid == request.auth.uid ||
+                       resource.data.createdByUid == request.auth.uid ||
+                       (resource.data.status == 'PUBLISHED' && resource.data.assignedScope == 'ALL') ||
+                       (resource.data.status == 'PUBLISHED' && request.auth.uid in resource.data.assignedStudentUids)
+                     ));
+      allow create: if isSignedIn() && isValidId(examId) && isAdmin() &&
+                       incoming().createdByUid == request.auth.uid &&
+                       incoming().keys().hasAll(['title', 'subject', 'status', 'durationMinutes', 'totalMarks', 'marksPerQuestion', 'negativeMarks', 'passingPercentage', 'randomizeQuestions', 'randomizeOptions', 'showResultImmediately', 'allowAnswerReview', 'assignedScope', 'assignedStudentIds', 'assignedStudentUids', 'createdByUid', 'questionCount', 'questions', 'demoRecord', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['title', 'description', 'subject', 'batch', 'status', 'durationMinutes', 'totalMarks', 'marksPerQuestion', 'negativeMarks', 'passingPercentage', 'scheduledAtMillis', 'deadlineAtMillis', 'randomizeQuestions', 'randomizeOptions', 'showResultImmediately', 'allowAnswerReview', 'assignedScope', 'assignedStudentIds', 'assignedStudentUids', 'assignedTeacherUid', 'createdByUid', 'questionCount', 'questions', 'demoRecord', 'createdAt', 'updatedAt']) &&
+                       isValidExamination(incoming());
+      allow update: if isSignedIn() && isValidId(examId) && isValidExamination(incoming()) &&
+                       incoming().createdByUid == existing().createdByUid &&
+                       incoming().createdAt == existing().createdAt &&
+                       (
+                         isAdmin() ||
+                         // Action: Assigned teacher assigns published exam to their students or updates deadline
+                         (
+                           existing().status == 'PUBLISHED' &&
+                           existing().assignedTeacherUid == request.auth.uid &&
+                           incoming().status == existing().status &&
+                           incoming().diff(existing()).affectedKeys().hasOnly(['assignedStudentIds', 'assignedStudentUids', 'deadlineAtMillis', 'updatedAt'])
+                         )
+                       );
+      allow delete: if isSignedIn() && isValidId(examId) && isAdmin();
+    }
+
+    // 9. Protected Exam Answer Keys (Inaccessible to students prior to terminal SUBMITTED attempt)
+    match /exam_answer_keys/{examId} {
+      allow get: if isSignedIn() && isValidId(examId) && (
+                    isAdmin() ||
+                    (
+                      exists(/databases/$(database)/documents/exam_attempts/$(examId + '_' + request.auth.uid)) &&
+                      get(/databases/$(database)/documents/exam_attempts/$(examId + '_' + request.auth.uid)).data.status == 'SUBMITTED'
+                    )
+                  );
+      allow list: if isBootstrappedAdmin();
+      allow create: if isSignedIn() && isValidId(examId) && isAdmin() &&
+                       incoming().examId == examId &&
+                       incoming().createdByUid == request.auth.uid &&
+                       incoming().keys().hasAll(['examId', 'answers', 'marksPerQuestion', 'negativeMarks', 'passingPercentage', 'createdByUid', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['examId', 'answers', 'explanations', 'marksPerQuestion', 'negativeMarks', 'passingPercentage', 'createdByUid', 'createdAt', 'updatedAt']) &&
+                       isValidExamAnswerKey(incoming());
+      allow update: if isSignedIn() && isValidId(examId) && isValidExamAnswerKey(incoming()) &&
+                       incoming().examId == existing().examId &&
+                       incoming().createdByUid == existing().createdByUid &&
+                       incoming().createdAt == existing().createdAt &&
+                       isAdmin();
+      allow delete: if isSignedIn() && isValidId(examId) && isAdmin();
+    }
+
+    // 10. Student Exam Attempts (Terminal state locked on SUBMITTED)
+    match /exam_attempts/{attemptId} {
+      allow get: if isSignedIn() && isValidId(attemptId) && (
+                    isAdmin() ||
+                    existing().studentUid == request.auth.uid ||
+                    existing().assignedTeacherUid == request.auth.uid
+                  );
+      allow list: if isBootstrappedAdmin() ||
+                     (isSignedIn() && (
+                       resource.data.studentUid == request.auth.uid ||
+                       resource.data.assignedTeacherUid == request.auth.uid
+                     ));
+      allow create: if isSignedIn() && isValidId(attemptId) &&
+                       incoming().keys().hasAll(['examId', 'examTitle', 'studentUid', 'studentName', 'status', 'responses', 'flaggedQuestionIds', 'currentQuestionIndex', 'startedAtMillis', 'timeTakenSeconds', 'demoRecord', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['examId', 'examTitle', 'studentUid', 'studentId', 'studentName', 'assignedTeacherUid', 'status', 'responses', 'flaggedQuestionIds', 'currentQuestionIndex', 'startedAtMillis', 'submittedAtMillis', 'timeTakenSeconds', 'demoRecord', 'createdAt', 'updatedAt']) &&
+                       isValidExamAttempt(incoming()) &&
+                       exists(/databases/$(database)/documents/examinations/$(incoming().examId)) &&
+                       (
+                         isAdmin() ||
+                         (
+                           incoming().studentUid == request.auth.uid &&
+                           attemptId == incoming().examId + '_' + request.auth.uid &&
+                           incoming().status == 'IN_PROGRESS' &&
+                           get(/databases/$(database)/documents/examinations/$(incoming().examId)).data.status == 'PUBLISHED'
+                         )
+                       );
+      allow update: if isSignedIn() && isValidId(attemptId) && isValidExamAttempt(incoming()) &&
+                       incoming().examId == existing().examId &&
+                       incoming().studentUid == existing().studentUid &&
+                       incoming().createdAt == existing().createdAt &&
+                       (
+                         isAdmin() ||
+                         // Action: Save progress while IN_PROGRESS (Terminal SUBMITTED state cannot be altered)
+                         (
+                           existing().studentUid == request.auth.uid &&
+                           existing().status == 'IN_PROGRESS' &&
+                           incoming().status == 'IN_PROGRESS' &&
+                           incoming().diff(existing()).affectedKeys().hasOnly(['responses', 'flaggedQuestionIds', 'currentQuestionIndex', 'timeTakenSeconds', 'updatedAt'])
+                         ) ||
+                         // Action: Final Submit transition IN_PROGRESS -> SUBMITTED
+                         (
+                           existing().studentUid == request.auth.uid &&
+                           existing().status == 'IN_PROGRESS' &&
+                           incoming().status == 'SUBMITTED' &&
+                           incoming().diff(existing()).affectedKeys().hasOnly(['responses', 'flaggedQuestionIds', 'currentQuestionIndex', 'status', 'submittedAtMillis', 'timeTakenSeconds', 'updatedAt'])
+                         )
+                       );
+      allow delete: if isSignedIn() && isValidId(attemptId) && isAdmin();
+    }
+
+    // 11. Evaluated Exam Results (Student isolated; Teacher scoped & cannot alter FINALIZED results)
+    match /exam_results/{resultId} {
+      allow get: if isSignedIn() && isValidId(resultId) && (
+                    isAdmin() ||
+                    existing().studentUid == request.auth.uid ||
+                    existing().assignedTeacherUid == request.auth.uid
+                  );
+      allow list: if isBootstrappedAdmin() ||
+                     (isSignedIn() && (
+                       resource.data.studentUid == request.auth.uid ||
+                       resource.data.assignedTeacherUid == request.auth.uid
+                     ));
+      allow create: if isSignedIn() && isValidId(resultId) &&
+                       incoming().keys().hasAll(['examId', 'examTitle', 'subject', 'studentUid', 'studentName', 'totalQuestions', 'correctCount', 'wrongCount', 'unattemptedCount', 'pendingManualCount', 'totalMarks', 'obtainedMarks', 'percentage', 'passed', 'timeTakenSeconds', 'resultsVisibleToStudent', 'allowAnswerReview', 'gradingStatus', 'questionAnalyses', 'demoRecord', 'submittedAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['examId', 'examTitle', 'subject', 'batch', 'studentUid', 'studentId', 'studentCode', 'studentName', 'assignedTeacherId', 'assignedTeacherUid', 'assignedTeacherName', 'totalQuestions', 'correctCount', 'wrongCount', 'unattemptedCount', 'pendingManualCount', 'totalMarks', 'obtainedMarks', 'percentage', 'passed', 'timeTakenSeconds', 'resultsVisibleToStudent', 'allowAnswerReview', 'gradingStatus', 'questionAnalyses', 'demoRecord', 'submittedAt', 'updatedAt']) &&
+                       isValidExamResult(incoming()) &&
+                       (
+                         isAdmin() ||
+                         (
+                           incoming().studentUid == request.auth.uid &&
+                           resultId == incoming().examId + '_' + request.auth.uid &&
+                           exists(/databases/$(database)/documents/exam_attempts/$(resultId)) &&
+                           get(/databases/$(database)/documents/exam_attempts/$(resultId)).data.status == 'SUBMITTED'
+                         )
+                       );
+      allow update: if isSignedIn() && isValidId(resultId) && isValidExamResult(incoming()) &&
+                       incoming().examId == existing().examId &&
+                       incoming().studentUid == existing().studentUid &&
+                       incoming().submittedAt == existing().submittedAt &&
+                       (
+                         isAdmin() ||
+                         // Action: Assigned Teacher completes pending manual grading of short-answer questions (cannot alter FINALIZED results)
+                         (
+                           existing().assignedTeacherUid == request.auth.uid &&
+                           existing().gradingStatus == 'PENDING_REVIEW' &&
+                           incoming().gradingStatus in ['PENDING_REVIEW', 'FINALIZED'] &&
+                           incoming().diff(existing()).affectedKeys().hasOnly(['correctCount', 'wrongCount', 'pendingManualCount', 'obtainedMarks', 'percentage', 'passed', 'gradingStatus', 'questionAnalyses', 'updatedAt'])
+                         )
+                       );
+      allow delete: if isSignedIn() && isValidId(resultId) && isAdmin();
+    }
+
+    // 12. Notifications
+    match /notifications/{notificationId} {
+      allow get: if isSignedIn() && isValidId(notificationId) && (isAdmin() || existing().recipientUid == request.auth.uid);
+      allow list: if isBootstrappedAdmin() || (isSignedIn() && resource.data.recipientUid == request.auth.uid);
+      allow create: if isSignedIn() && isValidId(notificationId) &&
+                       incoming().senderUid == request.auth.uid &&
+                       incoming().keys().hasAll(['recipientUid', 'senderUid', 'title', 'message', 'category', 'read', 'createdAt']) &&
+                       incoming().keys().hasOnly(['recipientUid', 'senderUid', 'title', 'message', 'category', 'relatedExamId', 'read', 'createdAt']) &&
+                       isValidNotification(incoming());
+      allow update: if isSignedIn() && isValidId(notificationId) && isValidNotification(incoming()) &&
+                       incoming().recipientUid == existing().recipientUid &&
+                       incoming().senderUid == existing().senderUid &&
+                       incoming().createdAt == existing().createdAt &&
+                       (
+                         isAdmin() ||
+                         (existing().recipientUid == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['read']))
+                       );
+      allow delete: if isSignedIn() && isValidId(notificationId) && (isAdmin() || existing().recipientUid == request.auth.uid);
+    }
+
+    // 13. Audit Logs (Append-only, Admin-readable)
+    match /audit_logs/{logId} {
+      allow get: if isSignedIn() && isValidId(logId) && isAdmin();
+      allow list: if isBootstrappedAdmin();
+      allow create: if isSignedIn() && isValidId(logId) &&
+                       incoming().actorUid == request.auth.uid &&
+                       incoming().keys().hasAll(['actorUid', 'actorEmail', 'actorRole', 'action', 'targetType', 'targetId', 'details', 'createdAt']) &&
+                       incoming().keys().hasOnly(['actorUid', 'actorEmail', 'actorRole', 'action', 'targetType', 'targetId', 'details', 'createdAt']) &&
+                       isValidAuditLog(incoming());
+      allow update: if false;
+      allow delete: if false;
+    }
+  }
+}

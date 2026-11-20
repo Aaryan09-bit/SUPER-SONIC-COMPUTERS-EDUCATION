@@ -1,0 +1,6 @@
+{
+  "name": "Super Sonic Edu",
+  "description": "AI-powered online examination and student performance management system for Super Sonic Computers Education.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
