@@ -27,6 +27,7 @@ import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.WriteBatch
 import com.google.firebase.firestore.snapshots
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
@@ -35,7 +36,6 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.tasks.await
 import java.util.UUID
 import kotlin.math.max
-import kotlin.math.min
 import kotlin.math.round
 
 class InstituteExamRepository(
@@ -46,16 +46,18 @@ class InstituteExamRepository(
 
     // ==================== PDF PAPERS & QUESTION BANK ====================
 
-    fun observePdfPapers(): Flow<List<PdfPaper>> =
+    fun observePdfPapers(limit: Long = 100L): Flow<List<PdfPaper>> =
         db.collection("pdf_papers")
+            .limit(limit.coerceIn(1L, 500L))
             .snapshots()
             .map { snap ->
                 snap.toObjects(PdfPaper::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
                     .sortedByDescending { it.createdAt?.seconds ?: 0L }
             }
 
-    fun observeQuestionBank(): Flow<List<BankQuestion>> =
+    fun observeQuestionBank(limit: Long = 150L): Flow<List<BankQuestion>> =
         db.collection("questions")
+            .limit(limit.coerceIn(1L, 1500L))
             .snapshots()
             .map { snap ->
                 snap.toObjects(BankQuestion::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
@@ -64,6 +66,7 @@ class InstituteExamRepository(
 
     suspend fun importBundledSetToQuestionBank(set: BundledQuestionSet): Result<Int> = try {
         val uid = auth.currentUser?.uid ?: error("Not signed in")
+        require(set.questions.isNotEmpty()) { "Selected question paper set contains no questions." }
         val paperId = "paper_${set.setId}"
         val approvedCount = set.questions.count { it.correctOption.isNotBlank() }
 
@@ -83,8 +86,8 @@ class InstituteExamRepository(
             "updatedAt" to FieldValue.serverTimestamp()
         )
 
-        val batch = db.batch()
-        batch.set(db.collection("pdf_papers").document(paperId), paperData)
+        val ops = mutableListOf<(WriteBatch) -> Unit>()
+        ops += { b -> b.set(db.collection("pdf_papers").document(paperId), paperData) }
 
         set.questions.forEach { q ->
             val qId = "q_${set.setId}_${q.number}"
@@ -107,9 +110,9 @@ class InstituteExamRepository(
                 "createdAt" to FieldValue.serverTimestamp(),
                 "updatedAt" to FieldValue.serverTimestamp()
             )
-            batch.set(db.collection("questions").document(qId), qData)
+            ops += { b -> b.set(db.collection("questions").document(qId), qData) }
         }
-        batch.commit().await()
+        commitChunkedWrites(ops)
 
         directoryRepo.logAudit(
             UserRole.ADMIN,
@@ -135,38 +138,54 @@ class InstituteExamRepository(
         drafts: List<ExtractedDraftQuestion>
     ): Result<Int> = try {
         val uid = auth.currentUser?.uid ?: error("Not signed in")
-        require(drafts.isNotEmpty()) { "No questions to save." }
-        val paperId = "paper_${shortId()}"
-        val approvedCount = drafts.count { it.approved && it.correctAnswer.isNotBlank() }
+        // Deduplicate by normalized question fingerprint and drop blank drafts so retries never create duplicates
+        val uniqueDrafts = LinkedHashMap<String, ExtractedDraftQuestion>()
+        drafts.forEach { d ->
+            val cleanText = d.questionText.trim()
+            if (cleanText.isNotEmpty()) {
+                val fp = PdfAiExtractorRepository.fingerprintQuestion(cleanText)
+                uniqueDrafts.putIfAbsent(fp, d.copy(questionText = cleanText))
+            }
+        }
+        require(uniqueDrafts.isNotEmpty()) { "No valid questions to save." }
+
+        val cleanTitle = title.trim().ifBlank { "Uploaded Question Paper" }.take(200)
+        val cleanFile = fileName.trim().ifBlank { "question_paper.pdf" }.take(200)
+        val paperFingerprint = PdfAiExtractorRepository.fingerprintQuestion("$cleanFile|$cleanTitle")
+        val paperId = "paper_${paperFingerprint.take(16)}"
+        val dedupedList = uniqueDrafts.entries.toList()
+        val approvedCount = dedupedList.count { (_, d) ->
+            d.approved && (d.correctAnswer.isNotBlank() || d.questionType == QuestionType.SHORT_ANSWER)
+        }
 
         val paperData = buildMap<String, Any> {
-            put("title", title.trim().ifBlank { "Uploaded Question Paper" }.take(200))
-            put("fileName", fileName.trim().ifBlank { "question_paper.pdf" }.take(200))
+            put("title", cleanTitle)
+            put("fileName", cleanFile)
             put("subject", subject.trim().ifBlank { "Computer Fundamentals" }.take(100))
             if (chapter.isNotBlank()) put("chapter", chapter.trim().take(120))
             if (topic.isNotBlank()) put("topic", topic.trim().take(120))
-            put("totalExtracted", drafts.size)
+            put("totalExtracted", dedupedList.size)
             put("approvedCount", approvedCount)
             put("sourceType", "UPLOADED_PDF")
             put("uploadedByUid", uid)
-            put("status", if (approvedCount == drafts.size) "APPROVED" else "PENDING_REVIEW")
+            put("status", if (approvedCount == dedupedList.size) "APPROVED" else "PENDING_REVIEW")
             put("demoRecord", false)
             put("createdAt", FieldValue.serverTimestamp())
             put("updatedAt", FieldValue.serverTimestamp())
         }
 
-        val batch = db.batch()
-        batch.set(db.collection("pdf_papers").document(paperId), paperData)
+        val ops = mutableListOf<(WriteBatch) -> Unit>()
+        ops += { b -> b.set(db.collection("pdf_papers").document(paperId), paperData) }
 
-        drafts.forEach { d ->
-            val qId = "q_${shortId()}"
+        dedupedList.forEach { (fp, d) ->
+            val qId = "q_${paperFingerprint.take(8)}_${fp.take(14)}"
             val ansList = d.correctAnswer
                 .split(",")
                 .map { it.trim() }
                 .filter { it.isNotEmpty() }
                 .take(10)
             val qData = buildMap<String, Any> {
-                put("questionText", d.questionText.trim().take(2000))
+                put("questionText", d.questionText.take(2000))
                 put("questionType", d.questionType.name)
                 put("options", d.options.take(10))
                 put("correctAnswers", ansList)
@@ -182,18 +201,18 @@ class InstituteExamRepository(
                 put("createdAt", FieldValue.serverTimestamp())
                 put("updatedAt", FieldValue.serverTimestamp())
             }
-            batch.set(db.collection("questions").document(qId), qData)
+            ops += { b -> b.set(db.collection("questions").document(qId), qData) }
         }
-        batch.commit().await()
+        commitChunkedWrites(ops)
 
         directoryRepo.logAudit(
             UserRole.ADMIN,
             "PDF_EXTRACTED_SAVED",
             "pdf_papers",
             paperId,
-            "Saved ${drafts.size} AI-extracted questions from $fileName"
+            "Saved ${dedupedList.size} unique AI-extracted questions from $cleanFile"
         )
-        Result.success(drafts.size)
+        Result.success(dedupedList.size)
     } catch (e: CancellationException) {
         throw e
     } catch (e: Exception) {
@@ -274,22 +293,26 @@ class InstituteExamRepository(
 
     // ==================== EXAMINATIONS ====================
 
-    fun observeAllExaminationsAdmin(): Flow<List<Examination>> =
+    fun observeAllExaminationsAdmin(limit: Long = 100L): Flow<List<Examination>> =
         db.collection("examinations")
+            .limit(limit.coerceIn(1L, 500L))
             .snapshots()
             .map { snap ->
                 snap.toObjects(Examination::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
                     .sortedByDescending { it.createdAt?.seconds ?: 0L }
             }
 
-    fun observeTeacherExaminations(teacherUid: String): Flow<List<Examination>> {
+    fun observeTeacherExaminations(teacherUid: String, limit: Long = 100L): Flow<List<Examination>> {
+        val bounded = limit.coerceIn(1L, 300L)
         val assignedFlow = db.collection("examinations")
             .whereEqualTo("assignedTeacherUid", teacherUid)
+            .limit(bounded)
             .snapshots()
             .map { it.toObjects(Examination::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) }
         val publicFlow = db.collection("examinations")
             .whereEqualTo("status", ExamStatus.PUBLISHED.name)
             .whereEqualTo("assignedScope", AssignedScope.ALL.name)
+            .limit(bounded)
             .snapshots()
             .map { it.toObjects(Examination::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) }
         return combine(assignedFlow, publicFlow) { a, b ->
@@ -297,15 +320,18 @@ class InstituteExamRepository(
         }
     }
 
-    fun observeStudentExaminations(studentUid: String): Flow<List<Examination>> {
+    fun observeStudentExaminations(studentUid: String, limit: Long = 100L): Flow<List<Examination>> {
+        val bounded = limit.coerceIn(1L, 300L)
         val allScopeFlow = db.collection("examinations")
             .whereEqualTo("status", ExamStatus.PUBLISHED.name)
             .whereEqualTo("assignedScope", AssignedScope.ALL.name)
+            .limit(bounded)
             .snapshots()
             .map { it.toObjects(Examination::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) }
         val targetedFlow = db.collection("examinations")
             .whereEqualTo("status", ExamStatus.PUBLISHED.name)
             .whereArrayContains("assignedStudentUids", studentUid)
+            .limit(bounded)
             .snapshots()
             .map { it.toObjects(Examination::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) }
         return combine(allScopeFlow, targetedFlow) { a, b ->
@@ -336,7 +362,12 @@ class InstituteExamRepository(
         demoRecord: Boolean = false
     ): Result<String> = try {
         val uid = auth.currentUser?.uid ?: error("Not signed in")
+        require(title.trim().isNotEmpty()) { "Examination title is required." }
         require(selectedQuestions.isNotEmpty()) { "Select at least 1 question for the examination." }
+        require(durationMinutes in 1..480) { "Duration must be between 1 and 480 minutes." }
+        require(marksPerQuestion > 0.0 && marksPerQuestion <= 100.0) { "Marks per question must be between 0.5 and 100." }
+        require(negativeMarks >= 0.0 && negativeMarks <= 50.0) { "Negative marks must be between 0 and 50." }
+        require(passingPercentage in 0.0..100.0) { "Passing percentage must be between 0 and 100." }
         val examId = "exam_${shortId()}"
 
         val sanitizedQuestions = selectedQuestions.mapIndexed { index, q ->
@@ -485,9 +516,10 @@ class InstituteExamRepository(
 
     // ==================== STUDENT ATTEMPTS & AUTO EVALUATION ====================
 
-    fun observeStudentAttempts(studentUid: String): Flow<List<ExamAttempt>> =
+    fun observeStudentAttempts(studentUid: String, limit: Long = 100L): Flow<List<ExamAttempt>> =
         db.collection("exam_attempts")
             .whereEqualTo("studentUid", studentUid)
+            .limit(limit.coerceIn(1L, 300L))
             .snapshots()
             .map { it.toObjects(ExamAttempt::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) }
 
@@ -497,51 +529,73 @@ class InstituteExamRepository(
         fallbackName: String
     ): Result<ExamAttempt> = try {
         val uid = auth.currentUser?.uid ?: error("Not signed in")
+        require(exam.questions.isNotEmpty()) { "This examination has no questions configured." }
+        require(exam.statusEnum() == ExamStatus.PUBLISHED) { "This examination is not currently published." }
+
         val attemptId = "${exam.id}_$uid"
         val docRef = db.collection("exam_attempts").document(attemptId)
-        val existingSnap = docRef.get().await()
-        if (existingSnap.exists()) {
-            val existing = existingSnap.toObject(ExamAttempt::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
-                ?: error("Could not resume attempt.")
-            if (existing.statusEnum() == AttemptStatus.SUBMITTED) {
-                return Result.failure(IllegalStateException("You have already submitted this examination."))
-            }
-            Result.success(existing)
-        } else {
-            val nowMillis = System.currentTimeMillis()
-            val payload = buildMap<String, Any> {
-                put("examId", exam.id)
-                put("examTitle", exam.title.take(200))
-                put("studentUid", uid)
-                if (!studentProfile?.id.isNullOrBlank()) put("studentId", studentProfile!!.id)
-                put("studentName", (studentProfile?.name ?: fallbackName).ifBlank { "Student" }.take(120))
+        val nowMillis = System.currentTimeMillis()
+
+        val resolvedAttempt: ExamAttempt = db.runTransaction { tx ->
+            val snap = tx.get(docRef)
+            if (snap.exists()) {
+                snap.toObject(ExamAttempt::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                    ?: error("Could not read existing exam attempt.")
+            } else {
+                if (exam.deadlineAtMillis > 0L && nowMillis > exam.deadlineAtMillis) {
+                    throw IllegalStateException("The submission deadline for this examination has passed.")
+                }
                 val tUid = studentProfile?.assignedTeacherUid?.takeIf { it.isNotBlank() } ?: exam.assignedTeacherUid
-                if (tUid.isNotBlank()) put("assignedTeacherUid", tUid)
-                put("status", AttemptStatus.IN_PROGRESS.name)
-                put("responses", emptyMap<String, String>())
-                put("flaggedQuestionIds", emptyList<String>())
-                put("currentQuestionIndex", 0)
-                put("startedAtMillis", nowMillis)
-                put("timeTakenSeconds", 0)
-                put("demoRecord", exam.demoRecord)
-                put("createdAt", FieldValue.serverTimestamp())
-                put("updatedAt", FieldValue.serverTimestamp())
+                val payload = buildMap<String, Any> {
+                    put("examId", exam.id)
+                    put("examTitle", exam.title.take(200))
+                    put("studentUid", uid)
+                    if (!studentProfile?.id.isNullOrBlank()) put("studentId", studentProfile!!.id)
+                    put("studentName", (studentProfile?.name ?: fallbackName).ifBlank { "Student" }.take(120))
+                    if (tUid.isNotBlank()) put("assignedTeacherUid", tUid)
+                    put("status", AttemptStatus.IN_PROGRESS.name)
+                    put("responses", emptyMap<String, String>())
+                    put("flaggedQuestionIds", emptyList<String>())
+                    put("currentQuestionIndex", 0)
+                    put("startedAtMillis", nowMillis)
+                    put("timeTakenSeconds", 0)
+                    put("demoRecord", exam.demoRecord)
+                    put("createdAt", FieldValue.serverTimestamp())
+                    put("updatedAt", FieldValue.serverTimestamp())
+                }
+                tx.set(docRef, payload)
+                ExamAttempt(
+                    id = attemptId,
+                    examId = exam.id,
+                    examTitle = exam.title,
+                    studentUid = uid,
+                    studentId = studentProfile?.id.orEmpty(),
+                    studentName = studentProfile?.name ?: fallbackName,
+                    assignedTeacherUid = tUid,
+                    status = AttemptStatus.IN_PROGRESS.name,
+                    startedAtMillis = nowMillis,
+                    demoRecord = exam.demoRecord
+                )
             }
-            docRef.set(payload).await()
-            val created = ExamAttempt(
-                id = attemptId,
-                examId = exam.id,
-                examTitle = exam.title,
-                studentUid = uid,
-                studentId = studentProfile?.id.orEmpty(),
-                studentName = studentProfile?.name ?: fallbackName,
-                assignedTeacherUid = studentProfile?.assignedTeacherUid.orEmpty(),
-                status = AttemptStatus.IN_PROGRESS.name,
-                startedAtMillis = nowMillis,
-                demoRecord = exam.demoRecord
-            )
-            Result.success(created)
+        }.await()
+
+        if (resolvedAttempt.statusEnum() == AttemptStatus.SUBMITTED) {
+            // Interrupted-submission recovery: if attempt was locked SUBMITTED before exam_results was created,
+            // complete result generation now so the student is never locked out without a scorecard.
+            val resultRef = db.collection("exam_results").document(attemptId)
+            val resultSnap = resultRef.get().await()
+            if (!resultSnap.exists()) {
+                completeResultWriteIfMissing(
+                    exam = exam,
+                    attempt = resolvedAttempt,
+                    studentProfile = studentProfile,
+                    responses = resolvedAttempt.responses,
+                    timeTakenSeconds = resolvedAttempt.timeTakenSeconds
+                )
+            }
+            return Result.failure(IllegalStateException("You have already submitted this examination. View your scorecard in Results."))
         }
+        Result.success(resolvedAttempt)
     } catch (e: CancellationException) {
         throw e
     } catch (e: Exception) {
@@ -584,22 +638,80 @@ class InstituteExamRepository(
     ): Result<ExamResult> = try {
         val uid = auth.currentUser?.uid ?: error("Not signed in")
         val attemptId = "${exam.id}_$uid"
+        val resultRef = db.collection("exam_results").document(attemptId)
+
+        // Idempotency fast-path: prevent duplicate submissions from creating duplicate results or failing
+        val existingResultSnap = resultRef.get().await()
+        if (existingResultSnap.exists()) {
+            val existingResult = existingResultSnap.toObject(ExamResult::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+            if (existingResult != null) return Result.success(existingResult)
+        }
+
+        val attemptRef = db.collection("exam_attempts").document(attemptId)
         val submittedMillis = System.currentTimeMillis()
+        val serverAnchoredElapsed = EvaluationEngine.computeServerAnchoredTimer(
+            durationMinutes = exam.durationMinutes,
+            serverCreatedAtMillis = attempt.createdAt?.toDate()?.time,
+            fallbackStartedAtMillis = attempt.startedAtMillis,
+            previouslyRecordedElapsedSec = timeTakenSeconds,
+            deadlineAtMillis = exam.deadlineAtMillis,
+            nowMillis = submittedMillis
+        ).elapsedSeconds
 
-        // Step 1: Lock attempt to terminal SUBMITTED state (irreversible for student)
-        db.collection("exam_attempts").document(attemptId).update(
-            mapOf(
-                "responses" to responses,
-                "flaggedQuestionIds" to flaggedQuestionIds.take(200),
-                "currentQuestionIndex" to currentQuestionIndex.coerceIn(0, 200),
-                "status" to AttemptStatus.SUBMITTED.name,
-                "submittedAtMillis" to submittedMillis,
-                "timeTakenSeconds" to timeTakenSeconds.coerceIn(0, 86400),
-                "updatedAt" to FieldValue.serverTimestamp()
-            )
-        ).await()
+        // Step 1: Atomically lock attempt IN_PROGRESS -> SUBMITTED (idempotent if already SUBMITTED)
+        val lockedResponses: Map<String, String> = db.runTransaction { tx ->
+            val snap = tx.get(attemptRef)
+            if (!snap.exists()) {
+                throw IllegalStateException("Examination attempt not found. Please reload and try again.")
+            }
+            val current = snap.toObject(ExamAttempt::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                ?: throw IllegalStateException("Unable to read exam attempt.")
+            if (current.statusEnum() == AttemptStatus.SUBMITTED) {
+                current.responses.ifEmpty { responses }
+            } else {
+                tx.update(
+                    attemptRef,
+                    mapOf(
+                        "responses" to responses,
+                        "flaggedQuestionIds" to flaggedQuestionIds.take(200),
+                        "currentQuestionIndex" to currentQuestionIndex.coerceIn(0, 200),
+                        "status" to AttemptStatus.SUBMITTED.name,
+                        "submittedAtMillis" to submittedMillis,
+                        "timeTakenSeconds" to serverAnchoredElapsed.coerceIn(0, 86400),
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                )
+                responses
+            }
+        }.await()
 
-        // Step 2: Now authorized to read protected exam_answer_keys/{examId}
+        // Step 2 & 3: Evaluate against protected answer key and write result idempotently via transaction
+        val saved = completeResultWriteIfMissing(
+            exam = exam,
+            attempt = attempt,
+            studentProfile = studentProfile,
+            responses = lockedResponses,
+            timeTakenSeconds = serverAnchoredElapsed
+        )
+        Result.success(saved)
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        handleFirestoreError(e, OperationType.WRITE, "exam_results/${exam.id}")
+        Result.failure(e)
+    }
+
+    private suspend fun completeResultWriteIfMissing(
+        exam: Examination,
+        attempt: ExamAttempt,
+        studentProfile: StudentProfile?,
+        responses: Map<String, String>,
+        timeTakenSeconds: Int
+    ): ExamResult {
+        val uid = auth.currentUser?.uid ?: error("Not signed in")
+        val attemptId = "${exam.id}_$uid"
+        val resultRef = db.collection("exam_results").document(attemptId)
+
         val keySnap = db.collection("exam_answer_keys").document(exam.id).get().await()
         val answerKey = keySnap.toObject(ExamAnswerKey::class.java)
             ?: ExamAnswerKey(
@@ -609,9 +721,9 @@ class InstituteExamRepository(
                 passingPercentage = exam.passingPercentage
             )
 
-        // Step 3: Deterministic Auto-Evaluation Engine
         val outcome = EvaluationEngine.evaluate(exam, answerKey, responses)
         val tUid = studentProfile?.assignedTeacherUid?.takeIf { it.isNotBlank() } ?: exam.assignedTeacherUid
+        val clampedDuration = timeTakenSeconds.coerceIn(0, 86400)
 
         val resultData = buildMap<String, Any> {
             put("examId", exam.id)
@@ -635,7 +747,7 @@ class InstituteExamRepository(
             put("obtainedMarks", outcome.obtainedMarks)
             put("percentage", outcome.percentage)
             put("passed", outcome.passed)
-            put("timeTakenSeconds", timeTakenSeconds.coerceIn(0, 86400))
+            put("timeTakenSeconds", clampedDuration)
             put("resultsVisibleToStudent", exam.showResultImmediately)
             put("allowAnswerReview", exam.allowAnswerReview)
             put("gradingStatus", outcome.gradingStatus.name)
@@ -645,19 +757,29 @@ class InstituteExamRepository(
             put("updatedAt", FieldValue.serverTimestamp())
         }
 
-        db.collection("exam_results").document(attemptId).set(resultData).await()
+        val createdNew = db.runTransaction { tx ->
+            val snap = tx.get(resultRef)
+            if (snap.exists()) {
+                false
+            } else {
+                tx.set(resultRef, resultData)
+                true
+            }
+        }.await()
 
-        if (tUid.isNotBlank() && tUid != uid) {
-            directoryRepo.sendNotification(
-                recipientUid = tUid,
-                title = "Examination Submitted",
-                message = "${attempt.studentName} submitted ${exam.title} (${outcome.percentage}%).",
-                category = NotificationCategory.EXAM_SUBMITTED,
-                relatedExamId = exam.id
-            )
+        if (createdNew && tUid.isNotBlank() && tUid != uid) {
+            runCatching {
+                directoryRepo.sendNotification(
+                    recipientUid = tUid,
+                    title = "Examination Submitted",
+                    message = "${attempt.studentName} submitted ${exam.title} (${outcome.percentage}%).",
+                    category = NotificationCategory.EXAM_SUBMITTED,
+                    relatedExamId = exam.id
+                )
+            }
         }
 
-        val saved = db.collection("exam_results").document(attemptId).get().await()
+        return resultRef.get().await()
             .toObject(ExamResult::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
             ?: ExamResult(
                 id = attemptId,
@@ -675,42 +797,39 @@ class InstituteExamRepository(
                 obtainedMarks = outcome.obtainedMarks,
                 percentage = outcome.percentage,
                 passed = outcome.passed,
-                timeTakenSeconds = timeTakenSeconds,
+                timeTakenSeconds = clampedDuration,
                 resultsVisibleToStudent = exam.showResultImmediately,
                 allowAnswerReview = exam.allowAnswerReview,
                 gradingStatus = outcome.gradingStatus.name,
                 questionAnalyses = outcome.questionAnalyses
             )
-        Result.success(saved)
-    } catch (e: CancellationException) {
-        throw e
-    } catch (e: Exception) {
-        handleFirestoreError(e, OperationType.WRITE, "exam_results/${exam.id}")
-        Result.failure(e)
     }
 
     // ==================== RESULTS & SUBJECTIVE GRADING ====================
 
-    fun observeAllResultsAdmin(): Flow<List<ExamResult>> =
+    fun observeAllResultsAdmin(limit: Long = 150L): Flow<List<ExamResult>> =
         db.collection("exam_results")
+            .limit(limit.coerceIn(1L, 1000L))
             .snapshots()
             .map { snap ->
                 snap.toObjects(ExamResult::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
                     .sortedByDescending { it.submittedAt?.seconds ?: 0L }
             }
 
-    fun observeTeacherResults(teacherUid: String): Flow<List<ExamResult>> =
+    fun observeTeacherResults(teacherUid: String, limit: Long = 150L): Flow<List<ExamResult>> =
         db.collection("exam_results")
             .whereEqualTo("assignedTeacherUid", teacherUid)
+            .limit(limit.coerceIn(1L, 500L))
             .snapshots()
             .map { snap ->
                 snap.toObjects(ExamResult::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
                     .sortedByDescending { it.submittedAt?.seconds ?: 0L }
             }
 
-    fun observeStudentResults(studentUid: String): Flow<List<ExamResult>> =
+    fun observeStudentResults(studentUid: String, limit: Long = 150L): Flow<List<ExamResult>> =
         db.collection("exam_results")
             .whereEqualTo("studentUid", studentUid)
+            .limit(limit.coerceIn(1L, 500L))
             .snapshots()
             .map { snap ->
                 snap.toObjects(ExamResult::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
@@ -720,42 +839,40 @@ class InstituteExamRepository(
     suspend fun gradeSubjectiveQuestion(
         result: ExamResult,
         questionId: String,
-        awardedMarks: Double,
-        passingPercentage: Double = 40.0
+        awardedMarks: Double
     ): Result<Unit> = try {
-        val updatedAnalyses = result.questionAnalyses.map { qa ->
-            if (qa.questionId == questionId) {
-                val safeMarks = awardedMarks.coerceIn(0.0, qa.maxMarks)
-                qa.copy(
-                    marksObtained = safeMarks,
-                    status = if (safeMarks > 0.0) AnswerStatus.CORRECT.name else AnswerStatus.WRONG.name,
-                    needsManualReview = false
-                )
-            } else qa
-        }
+        val resultRef = db.collection("exam_results").document(result.id)
+        val examRef = db.collection("examinations").document(result.examId)
 
-        val correct = updatedAnalyses.count { it.statusEnum() == AnswerStatus.CORRECT }
-        val wrong = updatedAnalyses.count { it.statusEnum() == AnswerStatus.WRONG }
-        val pending = updatedAnalyses.count { it.needsManualReview }
-        val totalObtained = round(updatedAnalyses.sumOf { it.marksObtained } * 100.0) / 100.0
-        val pct = if (result.totalMarks > 0.0) {
-            round(min(100.0, max(0.0, (max(0.0, totalObtained) / result.totalMarks) * 100.0)) * 10.0) / 10.0
-        } else 0.0
-        val newStatus = if (pending == 0) GradingStatus.FINALIZED.name else GradingStatus.PENDING_REVIEW.name
+        db.runTransaction { tx ->
+            val latestResultSnap = tx.get(resultRef)
+            val latestResult = latestResultSnap.toObject(ExamResult::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                ?: throw IllegalStateException("Result record no longer exists.")
+            val examSnap = tx.get(examRef)
+            val truePassingPercentage = examSnap.getDouble("passingPercentage") ?: 40.0
 
-        db.collection("exam_results").document(result.id).update(
-            mapOf(
-                "correctCount" to correct,
-                "wrongCount" to wrong,
-                "pendingManualCount" to pending,
-                "obtainedMarks" to totalObtained,
-                "percentage" to pct,
-                "passed" to (pct >= passingPercentage),
-                "gradingStatus" to newStatus,
-                "questionAnalyses" to updatedAnalyses.map { it.toMap() },
-                "updatedAt" to FieldValue.serverTimestamp()
+            val recalc = EvaluationEngine.recalculateAfterManualGrading(
+                result = latestResult,
+                questionId = questionId,
+                awardedMarks = awardedMarks,
+                passingPercentage = truePassingPercentage
             )
-        ).await()
+
+            tx.update(
+                resultRef,
+                mapOf(
+                    "correctCount" to recalc.correctCount,
+                    "wrongCount" to recalc.wrongCount,
+                    "pendingManualCount" to recalc.pendingManualCount,
+                    "obtainedMarks" to recalc.obtainedMarks,
+                    "percentage" to recalc.percentage,
+                    "passed" to recalc.passed,
+                    "gradingStatus" to recalc.gradingStatus.name,
+                    "questionAnalyses" to recalc.updatedAnalyses.map { it.toMap() },
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            )
+        }.await()
         Result.success(Unit)
     } catch (e: CancellationException) {
         throw e
@@ -992,6 +1109,14 @@ class InstituteExamRepository(
     } catch (e: Exception) {
         handleFirestoreError(e, OperationType.DELETE, "demo_clear")
         Result.failure(e)
+    }
+
+    private suspend fun commitChunkedWrites(ops: List<(WriteBatch) -> Unit>) {
+        ops.chunked(400).forEach { chunk ->
+            val batch = db.batch()
+            chunk.forEach { it(batch) }
+            batch.commit().await()
+        }
     }
 
     private fun List<BankQuestion>.associateIndexedAnswerMap(): Map<String, String> =

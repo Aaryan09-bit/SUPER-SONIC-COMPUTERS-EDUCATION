@@ -27,12 +27,15 @@ import com.example.data.repository.InstituteExamRepository
 import com.example.data.repository.PdfAiExtractorRepository
 import com.google.firebase.firestore.FirebaseFirestoreException
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
@@ -40,6 +43,8 @@ import kotlinx.coroutines.launch
 
 data class PdfExtractionUiState(
     val extracting: Boolean = false,
+    val progressLabel: String = "",
+    val progressFraction: Float = 0f,
     val paperTitle: String = "",
     val fileName: String = "",
     val subject: String = "Computer Fundamentals",
@@ -59,6 +64,7 @@ data class AdminBannerState(
     val includeDemoRecords: Boolean = true
 )
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class AdminViewModel(
     private val directoryRepo: InstituteDirectoryRepository,
     private val examRepo: InstituteExamRepository,
@@ -66,29 +72,38 @@ class AdminViewModel(
     private val pdfAiRepo: PdfAiExtractorRepository
 ) : ViewModel() {
 
+    private val _studentsLimit = MutableStateFlow(50L)
+    val studentsPageLimit: StateFlow<Long> = _studentsLimit.asStateFlow()
+
+    private val _questionsLimit = MutableStateFlow(60L)
+    val questionsPageLimit: StateFlow<Long> = _questionsLimit.asStateFlow()
+
+    private val _resultsLimit = MutableStateFlow(50L)
+    val resultsPageLimit: StateFlow<Long> = _resultsLimit.asStateFlow()
+
     val teachersState: StateFlow<UiState<List<TeacherProfile>>> =
-        directoryRepo.observeAllTeachers().asUiState("teachers")
+        directoryRepo.observeAllTeachers(100L).asUiState("teachers")
 
     val studentsState: StateFlow<UiState<List<StudentProfile>>> =
-        directoryRepo.observeAllStudents().asUiState("students")
+        _studentsLimit.flatMapLatest { lim -> directoryRepo.observeAllStudents(lim) }.asUiState("students")
 
     val pdfPapersState: StateFlow<UiState<List<PdfPaper>>> =
-        examRepo.observePdfPapers().asUiState("pdf_papers")
+        examRepo.observePdfPapers(100L).asUiState("pdf_papers")
 
     val questionsState: StateFlow<UiState<List<BankQuestion>>> =
-        examRepo.observeQuestionBank().asUiState("questions")
+        _questionsLimit.flatMapLatest { lim -> examRepo.observeQuestionBank(lim) }.asUiState("questions")
 
     val examinationsState: StateFlow<UiState<List<Examination>>> =
-        examRepo.observeAllExaminationsAdmin().asUiState("examinations")
+        examRepo.observeAllExaminationsAdmin(100L).asUiState("examinations")
 
     val resultsState: StateFlow<UiState<List<ExamResult>>> =
-        examRepo.observeAllResultsAdmin().asUiState("exam_results")
+        _resultsLimit.flatMapLatest { lim -> examRepo.observeAllResultsAdmin(lim) }.asUiState("exam_results")
 
     val notificationsState: StateFlow<UiState<List<NotificationItem>>> =
-        directoryRepo.observeAllNotificationsAdmin().asUiState("notifications")
+        directoryRepo.observeAllNotificationsAdmin(60L).asUiState("notifications")
 
     val auditLogsState: StateFlow<UiState<List<AuditLog>>> =
-        directoryRepo.observeAuditLogs().asUiState("audit_logs")
+        directoryRepo.observeAuditLogs(60L).asUiState("audit_logs")
 
     private val _bundledSets = MutableStateFlow<List<BundledQuestionSet>>(emptyList())
     val bundledSets: StateFlow<List<BundledQuestionSet>> = _bundledSets.asStateFlow()
@@ -99,11 +114,47 @@ class AdminViewModel(
     private val _bannerState = MutableStateFlow(AdminBannerState())
     val bannerState: StateFlow<AdminBannerState> = _bannerState.asStateFlow()
 
+    private var lastReconcileSignature: String = ""
+
     init {
         viewModelScope.launch {
             runCatching { bundledSetsRepo.loadBundledSets() }
                 .onSuccess { _bundledSets.value = it }
         }
+        // Automatically backfill assignedTeacherUid on students if their assigned Teacher recently
+        // linked their Google account via TCH-xxxx code.
+        viewModelScope.launch {
+            combine(teachersState, studentsState) { tState, sState -> tState to sState }
+                .collect { (tState, sState) ->
+                    if (tState is UiState.Success && sState is UiState.Success) {
+                        val linkedTeachers = tState.data.filter { it.linkedUid.isNotBlank() }
+                        val byId = linkedTeachers.associateBy { it.id }
+                        val needsSync = sState.data.filter { stu ->
+                            val teacher = byId[stu.assignedTeacherId] ?: return@filter false
+                            stu.assignedTeacherUid != teacher.linkedUid
+                        }
+                        if (needsSync.isNotEmpty()) {
+                            val sig = needsSync.joinToString("|") { "${it.id}:${byId[it.assignedTeacherId]?.linkedUid}" }
+                            if (sig != lastReconcileSignature) {
+                                lastReconcileSignature = sig
+                                directoryRepo.reconcileTeacherAssignments(tState.data, sState.data)
+                            }
+                        }
+                    }
+                }
+        }
+    }
+
+    fun loadMoreStudents() {
+        _studentsLimit.update { (it + 50L).coerceAtMost(500L) }
+    }
+
+    fun loadMoreQuestions() {
+        _questionsLimit.update { (it + 60L).coerceAtMost(1500L) }
+    }
+
+    fun loadMoreResults() {
+        _resultsLimit.update { (it + 50L).coerceAtMost(1000L) }
     }
 
     fun toggleDemoVisibility(include: Boolean) {
@@ -189,12 +240,28 @@ class AdminViewModel(
 
     fun extractPdfWithAi(uri: Uri, fileName: String) {
         viewModelScope.launch {
-            _extractionState.value = PdfExtractionUiState(extracting = true, fileName = fileName)
-            val result = pdfAiRepo.extractQuestionsFromPdfUri(uri, fileName)
+            _extractionState.value = PdfExtractionUiState(
+                extracting = true,
+                progressLabel = "Validating PDF file…",
+                progressFraction = 0.05f,
+                fileName = fileName
+            )
+            val result = pdfAiRepo.extractQuestionsFromPdfUri(uri, fileName) { prog ->
+                _extractionState.update {
+                    it.copy(
+                        progressLabel = prog.stageLabel,
+                        progressFraction = prog.progressFraction,
+                        pagesProcessed = prog.pagesProcessed,
+                        totalPages = prog.totalPages
+                    )
+                }
+            }
             result.fold(
                 onSuccess = { extracted ->
                     _extractionState.value = PdfExtractionUiState(
                         extracting = false,
+                        progressLabel = "Extraction complete",
+                        progressFraction = 1f,
                         paperTitle = extracted.detectedPaperTitle,
                         fileName = fileName,
                         subject = extracted.detectedSubject,
@@ -208,7 +275,9 @@ class AdminViewModel(
                     _extractionState.update {
                         it.copy(
                             extracting = false,
-                            error = err.localizedMessage ?: "AI extraction failed. Ensure App Check & internet are available."
+                            progressLabel = "",
+                            progressFraction = 0f,
+                            error = err.localizedMessage ?: "AI extraction failed. You can retry or add questions manually."
                         )
                     }
                 }

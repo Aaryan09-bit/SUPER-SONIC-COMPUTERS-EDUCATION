@@ -27,6 +27,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.CloudDone
+import androidx.compose.material.icons.outlined.CloudOff
 import androidx.compose.material.icons.outlined.Flag
 import androidx.compose.material.icons.outlined.GridView
 import androidx.compose.material.icons.outlined.Timer
@@ -51,6 +52,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -92,8 +94,19 @@ fun ExamTakingScreen(
     var showSubmitConfirm by remember { mutableStateOf(false) }
     var showExitConfirm by remember { mutableStateOf(false) }
 
-    state.completedResult?.let { res ->
-        onCompletedResult(res)
+    LaunchedEffect(state.completedResult?.id) {
+        state.completedResult?.let { res ->
+            onCompletedResult(res)
+        }
+    }
+
+    if (state.completedResult != null) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                CircularProgressIndicator()
+                Text("Opening your evaluated scorecard…", style = MaterialTheme.typography.bodyMedium)
+            }
+        }
         return
     }
 
@@ -121,8 +134,17 @@ fun ExamTakingScreen(
                         Column {
                             Text(state.exam?.title ?: "Examination", maxLines = 1, style = MaterialTheme.typography.titleMedium)
                             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                Icon(Icons.Outlined.CloudDone, contentDescription = null, modifier = Modifier.size(14.dp), tint = StatusSuccess)
-                                Text(state.lastSavedLabel, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Icon(
+                                    imageVector = if (state.offlinePendingSync) Icons.Outlined.CloudOff else Icons.Outlined.CloudDone,
+                                    contentDescription = if (state.offlinePendingSync) "Saved locally" else "Cloud synced",
+                                    modifier = Modifier.size(14.dp),
+                                    tint = if (state.offlinePendingSync) StatusWarning else StatusSuccess
+                                )
+                                Text(
+                                    text = state.lastSavedLabel,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (state.offlinePendingSync) StatusWarning else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
                             }
                         }
                     },
@@ -501,7 +523,11 @@ fun ExamTakingScreen(
             title = { Text("Pause & Exit Examination?") },
             text = { Text("Your answered progress is auto-saved, but the examination timer continues running until you submit.") },
             confirmButton = {
-                Button(onClick = { showExitConfirm = false; onExitWithoutSubmit() }) { Text("Exit for Now") }
+                Button(onClick = {
+                    showExitConfirm = false
+                    viewModel.flushProgressNow()
+                    onExitWithoutSubmit()
+                }) { Text("Exit for Now") }
             },
             dismissButton = { TextButton(onClick = { showExitConfirm = false }) { Text("Stay in Exam") } }
         )

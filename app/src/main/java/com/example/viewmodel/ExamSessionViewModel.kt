@@ -2,6 +2,7 @@ package com.example.viewmodel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.core.EvaluationEngine
 import com.example.core.friendlyFirestoreMessage
 import com.example.data.model.ExamAttempt
 import com.example.data.model.ExamResult
@@ -31,6 +32,7 @@ data class ExamSessionUiState(
     val remainingSeconds: Int = 0,
     val elapsedSeconds: Int = 0,
     val savingProgress: Boolean = false,
+    val offlinePendingSync: Boolean = false,
     val lastSavedLabel: String = "Auto-save ready",
     val submitting: Boolean = false,
     val completedResult: ExamResult? = null,
@@ -45,6 +47,7 @@ class ExamSessionViewModel(
     val uiState: StateFlow<ExamSessionUiState> = _uiState.asStateFlow()
 
     private var timerJob: Job? = null
+    private var debouncedSaveJob: Job? = null
     private var activeStudentProfile: StudentProfile? = null
     private var submittedGuard = false
 
@@ -54,6 +57,7 @@ class ExamSessionViewModel(
         studentFallbackName: String
     ) {
         timerJob?.cancel()
+        debouncedSaveJob?.cancel()
         submittedGuard = false
         activeStudentProfile = studentProfile
         _uiState.value = ExamSessionUiState(loading = true, exam = exam)
@@ -77,11 +81,13 @@ class ExamSessionViewModel(
                         q.questionId to if (exam.randomizeOptions && paired.size > 1) paired.shuffled(Random(seed + q.questionId.hashCode())) else paired
                     }
 
-                    val totalAllowedSec = (exam.durationMinutes * 60).coerceAtLeast(60)
-                    val elapsedFromStart = ((System.currentTimeMillis() - attempt.startedAtMillis) / 1000L)
-                        .toInt()
-                        .coerceAtLeast(attempt.timeTakenSeconds)
-                    val remaining = (totalAllowedSec - elapsedFromStart).coerceAtLeast(0)
+                    val timerSnap = EvaluationEngine.computeServerAnchoredTimer(
+                        durationMinutes = exam.durationMinutes,
+                        serverCreatedAtMillis = attempt.createdAt?.toDate()?.time,
+                        fallbackStartedAtMillis = attempt.startedAtMillis,
+                        previouslyRecordedElapsedSec = attempt.timeTakenSeconds,
+                        deadlineAtMillis = exam.deadlineAtMillis
+                    )
 
                     _uiState.value = ExamSessionUiState(
                         loading = false,
@@ -92,12 +98,12 @@ class ExamSessionViewModel(
                         currentIndex = attempt.currentQuestionIndex.coerceIn(0, (ordered.size - 1).coerceAtLeast(0)),
                         responses = attempt.responses,
                         flaggedIds = attempt.flaggedQuestionIds.toSet(),
-                        remainingSeconds = remaining,
-                        elapsedSeconds = elapsedFromStart,
+                        remainingSeconds = timerSnap.remainingSeconds,
+                        elapsedSeconds = timerSnap.elapsedSeconds,
                         lastSavedLabel = "Progress synced"
                     )
 
-                    if (remaining == 0) {
+                    if (timerSnap.expired) {
                         submitExam(autoSubmitted = true)
                     } else {
                         startCountdownTimer()
@@ -122,14 +128,23 @@ class ExamSessionViewModel(
             while (true) {
                 delay(1000L)
                 val cur = _uiState.value
+                val exam = cur.exam ?: break
+                val attempt = cur.attempt ?: break
                 if (cur.submitting || cur.completedResult != null) break
-                val nextRemaining = (cur.remainingSeconds - 1).coerceAtLeast(0)
-                val nextElapsed = cur.elapsedSeconds + 1
+
+                // Recompute from server-anchored start timestamp on every tick so sleep/background/refresh never drifts timer
+                val snap = EvaluationEngine.computeServerAnchoredTimer(
+                    durationMinutes = exam.durationMinutes,
+                    serverCreatedAtMillis = attempt.createdAt?.toDate()?.time,
+                    fallbackStartedAtMillis = attempt.startedAtMillis,
+                    previouslyRecordedElapsedSec = cur.elapsedSeconds,
+                    deadlineAtMillis = exam.deadlineAtMillis
+                )
                 _uiState.update {
-                    it.copy(remainingSeconds = nextRemaining, elapsedSeconds = nextElapsed)
+                    it.copy(remainingSeconds = snap.remainingSeconds, elapsedSeconds = snap.elapsedSeconds)
                 }
                 tickCounter++
-                if (nextRemaining <= 0) {
+                if (snap.expired) {
                     submitExam(autoSubmitted = true)
                     break
                 }
@@ -142,8 +157,9 @@ class ExamSessionViewModel(
 
     fun selectSingleAnswer(questionId: String, value: String) {
         _uiState.update {
-            it.copy(responses = it.responses + (questionId to value))
+            it.copy(responses = it.responses + (questionId to value), lastSavedLabel = "Unsaved edits…")
         }
+        scheduleDebouncedSave()
     }
 
     fun toggleMultiSelectAnswer(questionId: String, letter: String) {
@@ -161,12 +177,16 @@ class ExamSessionViewModel(
             } else {
                 cur.responses + (questionId to serialized)
             }
-            cur.copy(responses = nextResponses)
+            cur.copy(responses = nextResponses, lastSavedLabel = "Unsaved edits…")
         }
+        scheduleDebouncedSave()
     }
 
     fun clearAnswer(questionId: String) {
-        _uiState.update { it.copy(responses = it.responses - questionId) }
+        _uiState.update {
+            it.copy(responses = it.responses - questionId, lastSavedLabel = "Unsaved edits…")
+        }
+        scheduleDebouncedSave()
     }
 
     fun toggleFlagQuestion(questionId: String) {
@@ -174,6 +194,7 @@ class ExamSessionViewModel(
             val next = if (cur.flaggedIds.contains(questionId)) cur.flaggedIds - questionId else cur.flaggedIds + questionId
             cur.copy(flaggedIds = next)
         }
+        scheduleDebouncedSave()
     }
 
     fun goToQuestion(index: Int) {
@@ -187,20 +208,52 @@ class ExamSessionViewModel(
 
     fun previousQuestion() = goToQuestion(_uiState.value.currentIndex - 1)
 
+    fun flushProgressNow() {
+        debouncedSaveJob?.cancel()
+        persistProgress()
+    }
+
+    private fun scheduleDebouncedSave() {
+        debouncedSaveJob?.cancel()
+        debouncedSaveJob = viewModelScope.launch {
+            delay(2000L)
+            persistProgress()
+        }
+    }
+
     private fun persistProgress() {
         val cur = _uiState.value
         val attemptId = cur.attempt?.id ?: return
         if (cur.submitting || cur.completedResult != null) return
         viewModelScope.launch {
             _uiState.update { it.copy(savingProgress = true) }
-            examRepo.autoSaveAttemptProgress(
+            val result = examRepo.autoSaveAttemptProgress(
                 attemptId = attemptId,
                 responses = cur.responses,
                 flaggedQuestionIds = cur.flaggedIds.toList(),
                 currentQuestionIndex = cur.currentIndex,
                 timeTakenSeconds = cur.elapsedSeconds
             )
-            _uiState.update { it.copy(savingProgress = false, lastSavedLabel = "Auto-saved") }
+            result.fold(
+                onSuccess = {
+                    _uiState.update {
+                        it.copy(
+                            savingProgress = false,
+                            offlinePendingSync = false,
+                            lastSavedLabel = "Cloud synced"
+                        )
+                    }
+                },
+                onFailure = {
+                    _uiState.update {
+                        it.copy(
+                            savingProgress = false,
+                            offlinePendingSync = true,
+                            lastSavedLabel = "Saved locally • Retrying sync"
+                        )
+                    }
+                }
+            )
         }
     }
 
@@ -211,6 +264,7 @@ class ExamSessionViewModel(
         val attempt = cur.attempt ?: return
         submittedGuard = true
         timerJob?.cancel()
+        debouncedSaveJob?.cancel()
         _uiState.update { it.copy(submitting = true, error = null) }
 
         viewModelScope.launch {
@@ -227,6 +281,7 @@ class ExamSessionViewModel(
                     _uiState.update {
                         it.copy(
                             submitting = false,
+                            offlinePendingSync = false,
                             completedResult = result,
                             lastSavedLabel = if (autoSubmitted) "Time expired • Auto-submitted" else "Submitted"
                         )
@@ -237,7 +292,8 @@ class ExamSessionViewModel(
                     _uiState.update {
                         it.copy(
                             submitting = false,
-                            error = friendlyFirestoreMessage(err, "Submission failed. Please retry.")
+                            offlinePendingSync = true,
+                            error = friendlyFirestoreMessage(err, "Submission failed. Check your connection and tap Submit again—your answers are safely preserved.")
                         )
                     }
                 }
@@ -247,6 +303,7 @@ class ExamSessionViewModel(
 
     fun resetSession() {
         timerJob?.cancel()
+        debouncedSaveJob?.cancel()
         submittedGuard = false
         _uiState.value = ExamSessionUiState()
     }
@@ -254,5 +311,6 @@ class ExamSessionViewModel(
     override fun onCleared() {
         super.onCleared()
         timerJob?.cancel()
+        debouncedSaveJob?.cancel()
     }
 }

@@ -20,13 +20,19 @@ import androidx.compose.material.icons.automirrored.outlined.Assignment
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Archive
 import androidx.compose.material.icons.outlined.Publish
+import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Unpublished
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
@@ -34,6 +40,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -51,8 +58,10 @@ import com.example.data.model.StudentProfile
 import com.example.data.model.TeacherProfile
 import com.example.ui.components.EmptyStateCard
 import com.example.ui.components.InstituteCard
+import com.example.ui.components.LoadingSkeletonList
 import com.example.ui.components.SectionHeader
 import com.example.ui.components.StatusPill
+import com.example.ui.components.rememberDebouncedText
 import com.example.ui.theme.BrandDarkBlue
 import com.example.ui.theme.BrandSurfaceTint
 import com.example.ui.theme.StatusInfo
@@ -89,13 +98,23 @@ fun AdminExamsScreen(
         assignedTeacherUid: String,
         selectedQuestions: List<BankQuestion>
     ) -> Unit,
-    onUpdateExamStatus: (String, ExamStatus) -> Unit
+    onUpdateExamStatus: (String, ExamStatus) -> Unit,
+    isLoading: Boolean = false,
+    canLoadMoreQuestions: Boolean = false,
+    onLoadMoreQuestions: () -> Unit = {}
 ) {
     var showCreateDialog by remember { mutableStateOf(false) }
     var statusFilter by remember { mutableStateOf<ExamStatus?>(null) }
 
-    val visibleExams = (if (includeDemoRecords) exams else exams.filterNot { it.demoRecord })
-        .filter { statusFilter == null || it.statusEnum() == statusFilter }
+    val visibleExams = remember(exams, includeDemoRecords, statusFilter) {
+        (if (includeDemoRecords) exams else exams.filterNot { it.demoRecord })
+            .filter { statusFilter == null || it.statusEnum() == statusFilter }
+    }
+
+    if (isLoading && exams.isEmpty()) {
+        LoadingSkeletonList(cardCount = 4)
+        return
+    }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -213,6 +232,8 @@ fun AdminExamsScreen(
             questions = questions,
             students = students.filter { it.active },
             teachers = teachers.filter { it.active },
+            canLoadMoreQuestions = canLoadMoreQuestions,
+            onLoadMoreQuestions = onLoadMoreQuestions,
             onDismiss = { showCreateDialog = false },
             onCreate = { title, desc, subj, batch, status, dur, marksQ, neg, pass, randQ, randO, showRes, allowRev, scope, selStus, tUid, selQs ->
                 onCreateExam(
@@ -225,11 +246,14 @@ fun AdminExamsScreen(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun CreateExamDialog(
     questions: List<BankQuestion>,
     students: List<StudentProfile>,
     teachers: List<TeacherProfile>,
+    canLoadMoreQuestions: Boolean,
+    onLoadMoreQuestions: () -> Unit,
     onDismiss: () -> Unit,
     onCreate: (
         String, String, String, String, ExamStatus, Int, Double, Double, Double,
@@ -250,8 +274,45 @@ private fun CreateExamDialog(
     var showImmediate by remember { mutableStateOf(true) }
     var allowReview by remember { mutableStateOf(true) }
     var scope by remember { mutableStateOf(AssignedScope.ALL) }
+    var selectedTeacher by remember { mutableStateOf(teachers.firstOrNull { it.linkedUid.isNotBlank() } ?: teachers.firstOrNull()) }
+    var teacherMenuOpen by remember { mutableStateOf(false) }
+
+    var questionSearch by remember { mutableStateOf("") }
+    val debouncedQuestionSearch = rememberDebouncedText(questionSearch, 200L)
+    var visibleQuestionLimit by remember { mutableIntStateOf(40) }
+    var studentSearch by remember { mutableStateOf("") }
+
     val selectedQuestionIds = remember { mutableStateListOf<String>() }
     val selectedStudentIds = remember { mutableStateListOf<String>() }
+
+    val filteredQuestions = remember(questions, debouncedQuestionSearch) {
+        if (debouncedQuestionSearch.isBlank()) questions
+        else questions.filter {
+            it.questionText.contains(debouncedQuestionSearch, ignoreCase = true) ||
+                it.subject.contains(debouncedQuestionSearch, ignoreCase = true) ||
+                it.chapter.contains(debouncedQuestionSearch, ignoreCase = true)
+        }
+    }
+    val filteredStudents = remember(students, studentSearch) {
+        if (studentSearch.isBlank()) students
+        else students.filter {
+            it.name.contains(studentSearch, ignoreCase = true) ||
+                it.studentCode.contains(studentSearch, ignoreCase = true) ||
+                it.batch.contains(studentSearch, ignoreCase = true)
+        }
+    }
+
+    val durationVal = durationStr.toIntOrNull()
+    val marksVal = marksStr.toDoubleOrNull()
+    val negVal = negStr.toDoubleOrNull()
+    val passVal = passStr.toDoubleOrNull()
+    val isValidForm = title.isNotBlank() &&
+        selectedQuestionIds.isNotEmpty() &&
+        durationVal != null && durationVal in 1..480 &&
+        marksVal != null && marksVal > 0.0 && marksVal <= 100.0 &&
+        negVal != null && negVal >= 0.0 && negVal <= 50.0 &&
+        passVal != null && passVal in 0.0..100.0 &&
+        (scope != AssignedScope.STUDENTS || selectedStudentIds.isNotEmpty())
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -283,6 +344,32 @@ private fun CreateExamDialog(
                     OutlinedTextField(value = passStr, onValueChange = { passStr = it }, label = { Text("Pass %") }, singleLine = true, modifier = Modifier.weight(1f))
                 }
 
+                // Explicit Supervising Teacher Selector
+                ExposedDropdownMenuBox(expanded = teacherMenuOpen, onExpandedChange = { teacherMenuOpen = it }) {
+                    OutlinedTextField(
+                        value = selectedTeacher?.let { "${it.name} (${it.teacherCode})" } ?: "Institute-Wide (No specific teacher)",
+                        onValueChange = {},
+                        readOnly = true,
+                        label = { Text("Supervising Teacher") },
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = teacherMenuOpen) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .menuAnchor(MenuAnchorType.PrimaryNotEditable)
+                    )
+                    ExposedDropdownMenu(expanded = teacherMenuOpen, onDismissRequest = { teacherMenuOpen = false }) {
+                        DropdownMenuItem(
+                            text = { Text("Institute-Wide (Admin managed)") },
+                            onClick = { selectedTeacher = null; teacherMenuOpen = false }
+                        )
+                        teachers.forEach { t ->
+                            DropdownMenuItem(
+                                text = { Text("${t.name} (${t.teacherCode})${if (t.linkedUid.isBlank()) " • Pending Sign-In" else ""}") },
+                                onClick = { selectedTeacher = t; teacherMenuOpen = false }
+                            )
+                        }
+                    }
+                }
+
                 Text("Assign To Scope", style = MaterialTheme.typography.labelLarge)
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     AssignedScope.entries.forEach { sc ->
@@ -290,7 +377,15 @@ private fun CreateExamDialog(
                     }
                 }
                 if (scope == AssignedScope.STUDENTS && students.isNotEmpty()) {
-                    students.take(10).forEach { stu ->
+                    OutlinedTextField(
+                        value = studentSearch,
+                        onValueChange = { studentSearch = it },
+                        placeholder = { Text("Search students (${selectedStudentIds.size} selected)...") },
+                        leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    filteredStudents.take(30).forEach { stu ->
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Checkbox(
                                 checked = selectedStudentIds.contains(stu.id),
@@ -298,7 +393,7 @@ private fun CreateExamDialog(
                                     if (checked) selectedStudentIds.add(stu.id) else selectedStudentIds.remove(stu.id)
                                 }
                             )
-                            Text("${stu.name} (${stu.studentCode})", style = MaterialTheme.typography.bodySmall)
+                            Text("${stu.name} (${stu.studentCode} • ${stu.batch})", style = MaterialTheme.typography.bodySmall)
                         }
                     }
                 }
@@ -315,15 +410,24 @@ private fun CreateExamDialog(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text("Select Questions (${selectedQuestionIds.size}/${questions.size})", style = MaterialTheme.typography.titleSmall)
-                    if (questions.isNotEmpty()) {
+                    if (filteredQuestions.isNotEmpty()) {
                         TextButton(onClick = {
                             selectedQuestionIds.clear()
-                            selectedQuestionIds.addAll(questions.take(15).map { it.id })
-                        }) { Text("Pick First 15") }
+                            selectedQuestionIds.addAll(filteredQuestions.take(15).map { it.id })
+                        }) { Text("Pick Top 15") }
                     }
                 }
 
-                questions.take(30).forEach { q ->
+                OutlinedTextField(
+                    value = questionSearch,
+                    onValueChange = { questionSearch = it },
+                    placeholder = { Text("Search bank by topic, subject, or text...") },
+                    leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                filteredQuestions.take(visibleQuestionLimit).forEach { q ->
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Checkbox(
                             checked = selectedQuestionIds.contains(q.id),
@@ -332,9 +436,19 @@ private fun CreateExamDialog(
                             }
                         )
                         Column {
-                            Text(q.questionText.take(64), style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
+                            Text(q.questionText.take(72), style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
                             Text("${q.subject} • ${q.typeEnum().name}", style = MaterialTheme.typography.labelSmall, color = BrandDarkBlue)
                         }
+                    }
+                }
+
+                if (filteredQuestions.size > visibleQuestionLimit) {
+                    TextButton(onClick = { visibleQuestionLimit += 40 }) {
+                        Text("Show More (${filteredQuestions.size - visibleQuestionLimit} remaining)")
+                    }
+                } else if (canLoadMoreQuestions) {
+                    TextButton(onClick = onLoadMoreQuestions) {
+                        Text("Load More Questions from Cloud Bank")
                     }
                 }
             }
@@ -354,21 +468,21 @@ private fun CreateExamDialog(
                         subject,
                         batch,
                         if (publishNow) ExamStatus.PUBLISHED else ExamStatus.DRAFT,
-                        durationStr.toIntOrNull() ?: 30,
-                        marksStr.toDoubleOrNull() ?: 2.0,
-                        negStr.toDoubleOrNull() ?: 0.0,
-                        passStr.toDoubleOrNull() ?: 40.0,
+                        durationVal ?: 30,
+                        marksVal ?: 2.0,
+                        negVal ?: 0.0,
+                        passVal ?: 40.0,
                         randomizeQ,
                         randomizeO,
                         showImmediate,
                         allowReview,
                         scope,
                         chosenStus,
-                        teachers.firstOrNull()?.linkedUid.orEmpty(),
+                        selectedTeacher?.linkedUid.orEmpty(),
                         chosenQs
                     )
                 },
-                enabled = title.isNotBlank() && selectedQuestionIds.isNotEmpty()
+                enabled = isValidForm
             ) { Text("Create Exam") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }

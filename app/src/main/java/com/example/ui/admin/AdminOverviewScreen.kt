@@ -31,6 +31,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -47,6 +48,7 @@ import com.example.ui.components.ChartBarEntry
 import com.example.ui.components.DonutBreakdownCard
 import com.example.ui.components.InstituteCard
 import com.example.ui.components.KpiMetricCard
+import com.example.ui.components.LoadingSkeletonList
 import com.example.ui.components.SectionHeader
 import com.example.ui.components.StatusPill
 import com.example.ui.components.TrendLineChartCard
@@ -77,52 +79,78 @@ fun AdminOverviewScreen(
     onSeedDemo: () -> Unit,
     onClearDemo: () -> Unit,
     onNavigateToPapers: () -> Unit,
-    onNavigateToExams: () -> Unit
+    onNavigateToExams: () -> Unit,
+    isLoading: Boolean = false
 ) {
-    val visibleStudents = if (includeDemoRecords) students else students.filterNot { it.demoRecord }
-    val visibleTeachers = if (includeDemoRecords) teachers else teachers.filterNot { it.demoRecord }
-    val visibleExams = if (includeDemoRecords) exams else exams.filterNot { it.demoRecord }
-    val visibleResults = if (includeDemoRecords) results else results.filterNot { it.demoRecord }
+    if (isLoading && students.isEmpty() && teachers.isEmpty() && exams.isEmpty() && results.isEmpty()) {
+        LoadingSkeletonList(cardCount = 5)
+        return
+    }
 
-    val hasAnyDemo = students.any { it.demoRecord } || teachers.any { it.demoRecord } ||
-        exams.any { it.demoRecord } || results.any { it.demoRecord }
+    val visibleStudents = remember(students, includeDemoRecords) {
+        if (includeDemoRecords) students else students.filterNot { it.demoRecord }
+    }
+    val visibleTeachers = remember(teachers, includeDemoRecords) {
+        if (includeDemoRecords) teachers else teachers.filterNot { it.demoRecord }
+    }
+    val visibleExams = remember(exams, includeDemoRecords) {
+        if (includeDemoRecords) exams else exams.filterNot { it.demoRecord }
+    }
+    val visibleResults = remember(results, includeDemoRecords) {
+        if (includeDemoRecords) results else results.filterNot { it.demoRecord }
+    }
 
-    val avgPerformance = if (visibleResults.isNotEmpty()) {
-        visibleResults.map { it.percentage }.average()
-    } else 0.0
-    val passedCount = visibleResults.count { it.passed }
+    val hasAnyDemo = remember(students, teachers, exams, results) {
+        students.any { it.demoRecord } || teachers.any { it.demoRecord } ||
+            exams.any { it.demoRecord } || results.any { it.demoRecord }
+    }
+
+    val avgPerformance = remember(visibleResults) {
+        if (visibleResults.isNotEmpty()) visibleResults.map { it.percentage }.average() else 0.0
+    }
+    val passedCount = remember(visibleResults) { visibleResults.count { it.passed } }
     val failedCount = visibleResults.size - passedCount
     val passPercentage = if (visibleResults.isNotEmpty()) (passedCount * 100.0 / visibleResults.size) else 0.0
-    val bundledTotalQuestions = bundledSets.sumOf { it.questionCount }
+    val bundledTotalQuestions = remember(bundledSets) { bundledSets.sumOf { it.questionCount } }
 
-    val subjectChartEntries = visibleResults
-        .groupBy { it.subject.ifBlank { "General" } }
-        .map { (subject, list) ->
-            ChartBarEntry(
-                label = subject.replace("Computer Fundamentals", "Comp Fund").take(11),
-                value = list.map { it.percentage }.average().toFloat(),
+    val subjectChartEntries = remember(visibleResults) {
+        visibleResults
+            .groupBy { it.subject.ifBlank { "General" } }
+            .map { (subject, list) ->
+                ChartBarEntry(
+                    label = subject.replace("Computer Fundamentals", "Comp Fund").take(11),
+                    value = list.map { it.percentage }.average().toFloat(),
+                    maxValue = 100f,
+                    valueSuffix = "%"
+                )
+            }
+            .sortedByDescending { it.value }
+    }
+
+    val trendPoints = remember(visibleResults) {
+        visibleResults
+            .sortedBy { it.submittedAt?.seconds ?: 0L }
+            .takeLast(20)
+            .mapIndexed { idx, res ->
+                "T${idx + 1}" to res.percentage.toFloat()
+            }
+    }
+
+    val teacherLoadEntries = remember(visibleTeachers, visibleResults) {
+        val resultsByTeacherId = visibleResults.filter { it.assignedTeacherId.isNotBlank() }.groupBy { it.assignedTeacherId }
+        val resultsByTeacherUid = visibleResults.filter { it.assignedTeacherUid.isNotBlank() }.groupBy { it.assignedTeacherUid }
+        visibleTeachers.mapNotNull { t ->
+            val tResults = (resultsByTeacherId[t.id].orEmpty() +
+                if (t.linkedUid.isNotBlank()) resultsByTeacherUid[t.linkedUid].orEmpty() else emptyList())
+                .distinctBy { it.id }
+            if (tResults.isEmpty()) null else ChartBarEntry(
+                label = t.name.substringAfterLast(" ").take(10),
+                value = tResults.map { it.percentage }.average().toFloat(),
                 maxValue = 100f,
                 valueSuffix = "%"
             )
         }
-        .sortedByDescending { it.value }
-
-    val trendPoints = visibleResults
-        .sortedBy { it.submittedAt?.seconds ?: 0L }
-        .mapIndexed { idx, res ->
-            "T${idx + 1}" to res.percentage.toFloat()
-        }
-
-    val teacherLoadEntries = visibleTeachers.map { t ->
-        val tResults = visibleResults.filter { it.assignedTeacherId == t.id || it.assignedTeacherUid == t.linkedUid }
-        val avg = if (tResults.isNotEmpty()) tResults.map { it.percentage }.average().toFloat() else 0f
-        ChartBarEntry(
-            label = t.name.substringAfterLast(" ").take(10),
-            value = avg,
-            maxValue = 100f,
-            valueSuffix = "%"
-        )
-    }.filter { it.value > 0f }
+    }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),

@@ -37,6 +37,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -68,7 +69,9 @@ import com.example.data.model.StudentProfile
 import com.example.data.model.TeacherProfile
 import com.example.ui.components.EmptyStateCard
 import com.example.ui.components.InstituteCard
+import com.example.ui.components.LoadingSkeletonList
 import com.example.ui.components.StatusPill
+import com.example.ui.components.rememberDebouncedText
 import com.example.ui.theme.BrandDarkBlue
 import com.example.ui.theme.BrandSurfaceTint
 import com.example.ui.theme.MonoFontFamily
@@ -96,10 +99,16 @@ fun AdminPeopleScreen(
     onDeleteStudent: (StudentProfile) -> Unit,
     onCreateTeacher: (String, String, String, String) -> Unit,
     onUpdateTeacher: (String, String, String, String, String, Boolean, String) -> Unit,
-    onDeleteTeacher: (TeacherProfile) -> Unit
+    onDeleteTeacher: (TeacherProfile) -> Unit,
+    isLoading: Boolean = false,
+    canLoadMoreStudents: Boolean = false,
+    onLoadMoreStudents: () -> Unit = {}
 ) {
     var selectedTab by remember { mutableIntStateOf(0) }
     var searchQuery by remember { mutableStateOf("") }
+    var onlyUnassignedStudents by remember { mutableStateOf(false) }
+    val debouncedQuery = rememberDebouncedText(searchQuery)
+
     var editingStudent by remember { mutableStateOf<StudentProfile?>(null) }
     var showCreateStudent by remember { mutableStateOf(false) }
     var viewingStudentProfile by remember { mutableStateOf<StudentProfile?>(null) }
@@ -108,21 +117,52 @@ fun AdminPeopleScreen(
     var editingTeacher by remember { mutableStateOf<TeacherProfile?>(null) }
     var showCreateTeacher by remember { mutableStateOf(false) }
 
-    val visibleStudents = (if (includeDemoRecords) students else students.filterNot { it.demoRecord })
-        .filter {
-            searchQuery.isBlank() ||
-                it.name.contains(searchQuery, ignoreCase = true) ||
-                it.studentCode.contains(searchQuery, ignoreCase = true) ||
-                it.batch.contains(searchQuery, ignoreCase = true) ||
-                it.course.contains(searchQuery, ignoreCase = true)
+    val baseStudents = remember(students, includeDemoRecords) {
+        if (includeDemoRecords) students else students.filterNot { it.demoRecord }
+    }
+    val unassignedCount = remember(baseStudents) {
+        baseStudents.count { it.assignedTeacherId.isBlank() }
+    }
+    val visibleStudents = remember(baseStudents, debouncedQuery, onlyUnassignedStudents) {
+        baseStudents.filter { stu ->
+            val matchesAssign = !onlyUnassignedStudents || stu.assignedTeacherId.isBlank()
+            val matchesQuery = debouncedQuery.isBlank() ||
+                stu.name.contains(debouncedQuery, ignoreCase = true) ||
+                stu.studentCode.contains(debouncedQuery, ignoreCase = true) ||
+                stu.batch.contains(debouncedQuery, ignoreCase = true) ||
+                stu.course.contains(debouncedQuery, ignoreCase = true)
+            matchesAssign && matchesQuery
         }
-    val visibleTeachers = (if (includeDemoRecords) teachers else teachers.filterNot { it.demoRecord })
-        .filter {
-            searchQuery.isBlank() ||
-                it.name.contains(searchQuery, ignoreCase = true) ||
-                it.teacherCode.contains(searchQuery, ignoreCase = true) ||
-                it.subjectSpecialty.contains(searchQuery, ignoreCase = true)
-        }
+    }
+    val visibleTeachers = remember(teachers, includeDemoRecords, debouncedQuery) {
+        (if (includeDemoRecords) teachers else teachers.filterNot { it.demoRecord })
+            .filter {
+                debouncedQuery.isBlank() ||
+                    it.name.contains(debouncedQuery, ignoreCase = true) ||
+                    it.teacherCode.contains(debouncedQuery, ignoreCase = true) ||
+                    it.subjectSpecialty.contains(debouncedQuery, ignoreCase = true)
+            }
+    }
+
+    // O(1) pre-indexed lookup maps to avoid O(N*M) nested loops during LazyColumn scroll
+    val resultsByStudentId = remember(results) {
+        results.filter { it.studentId.isNotBlank() }.groupBy { it.studentId }
+    }
+    val resultsByStudentUid = remember(results) {
+        results.filter { it.studentUid.isNotBlank() }.groupBy { it.studentUid }
+    }
+    val studentsCountByTeacherId = remember(students) {
+        students.filter { it.assignedTeacherId.isNotBlank() }.groupingBy { it.assignedTeacherId }.eachCount()
+    }
+    val resultsByTeacherId = remember(results) {
+        results.filter { it.assignedTeacherId.isNotBlank() }.groupBy { it.assignedTeacherId }
+    }
+    val resultsByTeacherUid = remember(results) {
+        results.filter { it.assignedTeacherUid.isNotBlank() }.groupBy { it.assignedTeacherUid }
+    }
+    val examCountByTeacherUid = remember(exams) {
+        exams.filter { it.assignedTeacherUid.isNotBlank() }.groupingBy { it.assignedTeacherUid }.eachCount()
+    }
 
     Column(modifier = Modifier.fillMaxSize()) {
         SecondaryTabRow(selectedTabIndex = selectedTab) {
@@ -167,6 +207,32 @@ fun AdminPeopleScreen(
             }
         }
 
+        if (selectedTab == 0 && unassignedCount > 0) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                FilterChip(
+                    selected = !onlyUnassignedStudents,
+                    onClick = { onlyUnassignedStudents = false },
+                    label = { Text("All (${baseStudents.size})") }
+                )
+                FilterChip(
+                    selected = onlyUnassignedStudents,
+                    onClick = { onlyUnassignedStudents = true },
+                    label = { Text("Unassigned ($unassignedCount)") },
+                    modifier = Modifier.testTag("filter_unassigned_students")
+                )
+            }
+        }
+
+        if (isLoading && students.isEmpty() && teachers.isEmpty()) {
+            LoadingSkeletonList(cardCount = 4)
+            return
+        }
+
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
@@ -183,7 +249,11 @@ fun AdminPeopleScreen(
                     }
                 } else {
                     items(visibleStudents, key = { it.id }) { stu ->
-                        val stuResults = results.filter { it.studentId == stu.id || (stu.linkedUid.isNotBlank() && it.studentUid == stu.linkedUid) }
+                        val stuResults = remember(stu.id, stu.linkedUid, resultsByStudentId, resultsByStudentUid) {
+                            (resultsByStudentId[stu.id].orEmpty() +
+                                if (stu.linkedUid.isNotBlank()) resultsByStudentUid[stu.linkedUid].orEmpty() else emptyList())
+                                .distinctBy { it.id }
+                        }
                         val avgPct = if (stuResults.isNotEmpty()) stuResults.map { it.percentage }.average() else null
                         InstituteCard(modifier = Modifier.fillMaxWidth()) {
                             Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -263,6 +333,18 @@ fun AdminPeopleScreen(
                             }
                         }
                     }
+                    if (canLoadMoreStudents) {
+                        item {
+                            OutlinedButton(
+                                onClick = onLoadMoreStudents,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("load_more_students_button")
+                            ) {
+                                Text("Load More Students")
+                            }
+                        }
+                    }
                 }
             } else {
                 if (visibleTeachers.isEmpty()) {
@@ -275,9 +357,13 @@ fun AdminPeopleScreen(
                     }
                 } else {
                     items(visibleTeachers, key = { it.id }) { tch ->
-                        val assignedStudents = students.filter { it.assignedTeacherId == tch.id }
-                        val teacherResults = results.filter { it.assignedTeacherId == tch.id || (tch.linkedUid.isNotBlank() && it.assignedTeacherUid == tch.linkedUid) }
-                        val teacherExams = exams.count { tch.linkedUid.isNotBlank() && it.assignedTeacherUid == tch.linkedUid }
+                        val assignedStudentCount = studentsCountByTeacherId[tch.id] ?: 0
+                        val teacherResults = remember(tch.id, tch.linkedUid, resultsByTeacherId, resultsByTeacherUid) {
+                            (resultsByTeacherId[tch.id].orEmpty() +
+                                if (tch.linkedUid.isNotBlank()) resultsByTeacherUid[tch.linkedUid].orEmpty() else emptyList())
+                                .distinctBy { it.id }
+                        }
+                        val teacherExams = if (tch.linkedUid.isNotBlank()) (examCountByTeacherUid[tch.linkedUid] ?: 0) else 0
                         val avg = if (teacherResults.isNotEmpty()) teacherResults.map { it.percentage }.average() else 0.0
                         InstituteCard(modifier = Modifier.fillMaxWidth()) {
                             Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -317,7 +403,7 @@ fun AdminPeopleScreen(
                                         text = String.format(
                                             Locale.getDefault(),
                                             "%d Students • %d Tests • Avg %.1f%%",
-                                            assignedStudents.size, teacherExams, avg
+                                            assignedStudentCount, teacherExams, avg
                                         ),
                                         style = MaterialTheme.typography.bodySmall,
                                         color = StatusInfo

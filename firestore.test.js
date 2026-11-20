@@ -502,3 +502,217 @@ test("Teacher can grade PENDING_REVIEW subjective results for assigned students 
     })
   );
 });
+
+test("Hardened Exam Attempt Security: Unassigned students blocked, startedAtMillis immutable, concurrent students isolated", async () => {
+  const now = pastDate();
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    const db = ctx.firestore();
+    await db.collection("examinations").doc("exam_restricted").set({
+      title: "Restricted Batch Test",
+      subject: "MS Excel",
+      status: "PUBLISHED",
+      durationMinutes: 15,
+      totalMarks: 4,
+      marksPerQuestion: 2,
+      negativeMarks: 0,
+      passingPercentage: 50,
+      randomizeQuestions: false,
+      randomizeOptions: false,
+      showResultImmediately: true,
+      allowAnswerReview: true,
+      assignedScope: "STUDENTS",
+      assignedStudentIds: ["stu_01"],
+      assignedStudentUids: [STUDENT_A_UID],
+      assignedTeacherUid: TEACHER_UID,
+      createdByUid: ADMIN_UID,
+      questionCount: 2,
+      questions: [
+        { questionId: "q1", text: "Q1", questionType: "MCQ", options: ["A", "B"], marks: 2, orderIndex: 0 },
+        { questionId: "q2", text: "Q2", questionType: "MCQ", options: ["A", "B"], marks: 2, orderIndex: 1 },
+      ],
+      demoRecord: false,
+      createdAt: now,
+      updatedAt: now,
+    });
+    await db.collection("examinations").doc("exam_draft").set({
+      title: "Draft Test",
+      subject: "MS Excel",
+      status: "DRAFT",
+      durationMinutes: 15,
+      totalMarks: 2,
+      marksPerQuestion: 2,
+      negativeMarks: 0,
+      passingPercentage: 50,
+      randomizeQuestions: false,
+      randomizeOptions: false,
+      showResultImmediately: true,
+      allowAnswerReview: true,
+      assignedScope: "ALL",
+      assignedStudentIds: [],
+      assignedStudentUids: [],
+      assignedTeacherUid: TEACHER_UID,
+      createdByUid: ADMIN_UID,
+      questionCount: 1,
+      questions: [
+        { questionId: "q1", text: "Q1", questionType: "MCQ", options: ["A", "B"], marks: 2, orderIndex: 0 },
+      ],
+      demoRecord: false,
+      createdAt: now,
+      updatedAt: now,
+    });
+  });
+
+  const stuADb = testEnv.authenticatedContext(STUDENT_A_UID, { email: "a@stu.edu", email_verified: true }).firestore();
+  const stuBDb = testEnv.authenticatedContext(STUDENT_B_UID, { email: "b@stu.edu", email_verified: true }).firestore();
+  const startedAt = Date.now() - 2000;
+
+  // 1. Unassigned Student B CANNOT start attempt on STUDENTS-scoped exam
+  await assertFails(
+    stuBDb.collection("exam_attempts").doc(`exam_restricted_${STUDENT_B_UID}`).set({
+      examId: "exam_restricted",
+      examTitle: "Restricted Batch Test",
+      studentUid: STUDENT_B_UID,
+      studentId: "stu_02",
+      studentName: "Student B",
+      assignedTeacherUid: TEACHER_UID,
+      status: "IN_PROGRESS",
+      responses: {},
+      flaggedQuestionIds: [],
+      currentQuestionIndex: 0,
+      startedAtMillis: startedAt,
+      timeTakenSeconds: 0,
+      demoRecord: false,
+      createdAt: now,
+      updatedAt: now,
+    })
+  );
+
+  // 2. Student A CANNOT start attempt on a DRAFT exam
+  await assertFails(
+    stuADb.collection("exam_attempts").doc(`exam_draft_${STUDENT_A_UID}`).set({
+      examId: "exam_draft",
+      examTitle: "Draft Test",
+      studentUid: STUDENT_A_UID,
+      studentId: "stu_01",
+      studentName: "Student A",
+      assignedTeacherUid: TEACHER_UID,
+      status: "IN_PROGRESS",
+      responses: {},
+      flaggedQuestionIds: [],
+      currentQuestionIndex: 0,
+      startedAtMillis: startedAt,
+      timeTakenSeconds: 0,
+      demoRecord: false,
+      createdAt: now,
+      updatedAt: now,
+    })
+  );
+
+  // 3. Assigned Student A CAN start attempt on PUBLISHED restricted exam
+  const attemptId = `exam_restricted_${STUDENT_A_UID}`;
+  await assertSucceeds(
+    stuADb.collection("exam_attempts").doc(attemptId).set({
+      examId: "exam_restricted",
+      examTitle: "Restricted Batch Test",
+      studentUid: STUDENT_A_UID,
+      studentId: "stu_01",
+      studentName: "Student A",
+      assignedTeacherUid: TEACHER_UID,
+      status: "IN_PROGRESS",
+      responses: {},
+      flaggedQuestionIds: [],
+      currentQuestionIndex: 0,
+      startedAtMillis: startedAt,
+      timeTakenSeconds: 0,
+      demoRecord: false,
+      createdAt: now,
+      updatedAt: now,
+    })
+  );
+
+  // 4. Student A CANNOT tamper with startedAtMillis to extend exam timer
+  await assertFails(
+    stuADb.collection("exam_attempts").doc(attemptId).update({
+      startedAtMillis: Date.now(),
+      updatedAt: pastDate(500),
+    })
+  );
+
+  // 5. Student B CANNOT read or update Student A's live attempt
+  await assertFails(stuBDb.collection("exam_attempts").doc(attemptId).get());
+  await assertFails(
+    stuBDb.collection("exam_attempts").doc(attemptId).update({
+      responses: { q1: "B" },
+      updatedAt: pastDate(400),
+    })
+  );
+});
+
+test("Admin can deactivate linked user accounts and cascade teacher reassignment on results", async () => {
+  const now = pastDate();
+  const resId = `exam_01_${STUDENT_A_UID}`;
+  const newTeacherUid = "teacher_uid_02";
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    const db = ctx.firestore();
+    await db.collection("users").doc(STUDENT_A_UID).set({
+      uid: STUDENT_A_UID,
+      email: "a@stu.edu",
+      displayName: "Student A",
+      role: "STUDENT",
+      active: true,
+      createdAt: now,
+      updatedAt: now,
+    });
+    await db.collection("exam_results").doc(resId).set({
+      examId: "exam_01",
+      examTitle: "MS Word Test",
+      subject: "MS Word",
+      studentUid: STUDENT_A_UID,
+      studentName: "Student A",
+      assignedTeacherId: "tch_01",
+      assignedTeacherUid: TEACHER_UID,
+      assignedTeacherName: "Prof. Sharma",
+      totalQuestions: 1,
+      correctCount: 1,
+      wrongCount: 0,
+      unattemptedCount: 0,
+      pendingManualCount: 0,
+      totalMarks: 2,
+      obtainedMarks: 2,
+      percentage: 100,
+      passed: true,
+      timeTakenSeconds: 50,
+      resultsVisibleToStudent: true,
+      allowAnswerReview: true,
+      gradingStatus: "FINALIZED",
+      questionAnalyses: [],
+      demoRecord: false,
+      submittedAt: now,
+      updatedAt: now,
+    });
+  });
+
+  const adminDb = testEnv.authenticatedContext(ADMIN_UID, {
+    email: ADMIN_EMAIL,
+    email_verified: true,
+  }).firestore();
+
+  // Admin deactivates linked user account
+  await assertSucceeds(
+    adminDb.collection("users").doc(STUDENT_A_UID).update({
+      active: false,
+      updatedAt: pastDate(200),
+    })
+  );
+
+  // Admin cascades teacher reassignment onto existing student exam_results
+  await assertSucceeds(
+    adminDb.collection("exam_results").doc(resId).update({
+      assignedTeacherId: "tch_02",
+      assignedTeacherUid: newTeacherUid,
+      assignedTeacherName: "Prof. Verma",
+      updatedAt: pastDate(100),
+    })
+  );
+});
+

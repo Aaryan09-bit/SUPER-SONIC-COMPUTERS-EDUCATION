@@ -51,8 +51,10 @@ import com.example.data.model.GradingStatus
 import com.example.data.model.NotificationItem
 import com.example.ui.components.EmptyStateCard
 import com.example.ui.components.InstituteCard
+import com.example.ui.components.LoadingSkeletonList
 import com.example.ui.components.SectionHeader
 import com.example.ui.components.StatusPill
+import com.example.ui.components.rememberDebouncedText
 import com.example.ui.theme.BrandDarkBlue
 import com.example.ui.theme.MonoFontFamily
 import com.example.ui.theme.StatusError
@@ -72,31 +74,39 @@ fun AdminResultsReportsScreen(
     notifications: List<NotificationItem>,
     auditLogs: List<AuditLog>,
     includeDemoRecords: Boolean,
-    onOpenResultAnalysis: (ExamResult) -> Unit
+    onOpenResultAnalysis: (ExamResult) -> Unit,
+    isLoading: Boolean = false,
+    canLoadMoreResults: Boolean = false,
+    onLoadMoreResults: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var selectedTab by remember { mutableIntStateOf(0) }
     var searchQuery by remember { mutableStateOf("") }
+    val debouncedQuery = rememberDebouncedText(searchQuery)
     var filterStatus by remember { mutableStateOf("ALL") } // ALL, PASS, FAIL, PENDING
     var exportStatus by remember { mutableStateOf<String?>(null) }
 
-    val baseResults = if (includeDemoRecords) results else results.filterNot { it.demoRecord }
-    val filteredResults = baseResults.filter { r ->
-        val matchesQuery = searchQuery.isBlank() ||
-            r.studentName.contains(searchQuery, ignoreCase = true) ||
-            r.studentCode.contains(searchQuery, ignoreCase = true) ||
-            r.examTitle.contains(searchQuery, ignoreCase = true) ||
-            r.subject.contains(searchQuery, ignoreCase = true) ||
-            r.batch.contains(searchQuery, ignoreCase = true) ||
-            r.assignedTeacherName.contains(searchQuery, ignoreCase = true)
-        val matchesFilter = when (filterStatus) {
-            "PASS" -> r.passed
-            "FAIL" -> !r.passed
-            "PENDING" -> r.gradingStatusEnum() == GradingStatus.PENDING_REVIEW
-            else -> true
+    val baseResults = remember(results, includeDemoRecords) {
+        if (includeDemoRecords) results else results.filterNot { it.demoRecord }
+    }
+    val filteredResults = remember(baseResults, debouncedQuery, filterStatus) {
+        baseResults.filter { r ->
+            val matchesQuery = debouncedQuery.isBlank() ||
+                r.studentName.contains(debouncedQuery, ignoreCase = true) ||
+                r.studentCode.contains(debouncedQuery, ignoreCase = true) ||
+                r.examTitle.contains(debouncedQuery, ignoreCase = true) ||
+                r.subject.contains(debouncedQuery, ignoreCase = true) ||
+                r.batch.contains(debouncedQuery, ignoreCase = true) ||
+                r.assignedTeacherName.contains(debouncedQuery, ignoreCase = true)
+            val matchesFilter = when (filterStatus) {
+                "PASS" -> r.passed
+                "FAIL" -> !r.passed
+                "PENDING" -> r.gradingStatusEnum() == GradingStatus.PENDING_REVIEW
+                else -> true
+            }
+            matchesQuery && matchesFilter
         }
-        matchesQuery && matchesFilter
     }
 
     val timeFmt = remember { SimpleDateFormat("dd MMM, HH:mm", Locale.getDefault()) }
@@ -140,7 +150,9 @@ fun AdminResultsReportsScreen(
                         }
                     }
                 }
-                LazyColumn(
+                if (isLoading && results.isEmpty()) {
+                    LoadingSkeletonList(cardCount = 4)
+                } else LazyColumn(
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -200,6 +212,18 @@ fun AdminResultsReportsScreen(
                                             Text(if (res.pendingManualCount > 0) "Grade & Review" else "Question Analysis")
                                         }
                                     }
+                                }
+                            }
+                        }
+                        if (canLoadMoreResults) {
+                            item {
+                                OutlinedButton(
+                                    onClick = onLoadMoreResults,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("load_more_results_button")
+                                ) {
+                                    Text("Load More Results")
                                 }
                             }
                         }

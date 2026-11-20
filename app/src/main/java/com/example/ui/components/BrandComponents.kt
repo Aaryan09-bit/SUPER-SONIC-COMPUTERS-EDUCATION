@@ -1,5 +1,10 @@
 package com.example.ui.components
 
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -29,8 +34,14 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
@@ -44,6 +55,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.example.data.model.UserRole
+import kotlinx.coroutines.delay
 import com.example.ui.theme.BrandBorderBlue
 import com.example.ui.theme.BrandDarkBlue
 import com.example.ui.theme.BrandDeepNavy
@@ -365,6 +377,90 @@ fun FeedbackBanner(
                 color = if (isErr) MaterialTheme.colorScheme.onErrorContainer else BrandDeepNavy,
                 modifier = Modifier.weight(1f)
             )
+        }
+    }
+}
+
+@Composable
+fun rememberDebouncedText(
+    value: String,
+    delayMs: Long = 240L
+): String {
+    var debounced by remember { mutableStateOf(value) }
+    LaunchedEffect(value) {
+        if (value.isBlank()) {
+            debounced = ""
+        } else {
+            delay(delayMs)
+            debounced = value
+        }
+    }
+    return debounced
+}
+
+@Composable
+fun LoadingSkeletonList(
+    cardCount: Int = 4,
+    modifier: Modifier = Modifier
+) {
+    val transition = rememberInfiniteTransition(label = "skeleton_pulse")
+    val pulseAlpha by transition.animateFloat(
+        initialValue = 0.35f,
+        targetValue = 0.80f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 850),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "skeleton_alpha"
+    )
+
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        repeat(cardCount) {
+            InstituteCard(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp)
+                        .alpha(pulseAlpha),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(0.55f)
+                            .height(16.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(BrandBorderBlue)
+                    )
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(0.88f)
+                            .height(12.dp)
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(BrandSurfaceTint)
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Box(
+                            modifier = Modifier
+                                .width(78.dp)
+                                .height(22.dp)
+                                .clip(CircleShape)
+                                .background(BrandSurfaceTint)
+                        )
+                        Box(
+                            modifier = Modifier
+                                .width(92.dp)
+                                .height(22.dp)
+                                .clip(CircleShape)
+                                .background(BrandSurfaceTint)
+                        )
+                    }
+                }
+            }
         }
     }
 }

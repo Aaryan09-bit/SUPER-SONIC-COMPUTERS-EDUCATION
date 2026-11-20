@@ -2,10 +2,12 @@ package com.example.core
 
 import com.example.data.model.AnswerStatus
 import com.example.data.model.ExamAnswerKey
+import com.example.data.model.ExamResult
 import com.example.data.model.Examination
 import com.example.data.model.GradingStatus
 import com.example.data.model.QuestionAnalysis
 import com.example.data.model.QuestionType
+import java.util.Locale
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.round
@@ -24,13 +26,87 @@ data class EvaluationOutcome(
     val questionAnalyses: List<QuestionAnalysis>
 )
 
+data class ManualGradingRecalculation(
+    val correctCount: Int,
+    val wrongCount: Int,
+    val unattemptedCount: Int,
+    val pendingManualCount: Int,
+    val obtainedMarks: Double,
+    val percentage: Double,
+    val passed: Boolean,
+    val gradingStatus: GradingStatus,
+    val updatedAnalyses: List<QuestionAnalysis>
+)
+
+data class ServerTimerSnapshot(
+    val elapsedSeconds: Int,
+    val remainingSeconds: Int,
+    val expired: Boolean
+)
+
+/**
+ * Single source of truth for deterministic examination evaluation, subjective grading
+ * recalculation, and server-anchored timer calculations across Admin, Teacher, and Student portals.
+ */
 object EvaluationEngine {
+
+    /**
+     * Canonical Percentage formula:
+     * Percentage = (Obtained Marks / Total Marks) * 100, clamped cleanly to [0.0, 100.0]
+     * and rounded to 1 decimal place.
+     */
+    fun calculatePercentage(obtainedMarks: Double, totalMarks: Double): Double {
+        if (totalMarks <= 0.0) return 0.0
+        val rawPct = (max(0.0, obtainedMarks) / totalMarks) * 100.0
+        return round(min(100.0, max(0.0, rawPct)) * 10.0) / 10.0
+    }
+
+    /**
+     * Computes server-controlled elapsed & remaining exam time anchored to Firestore's
+     * server createdAt timestamp (falling back to startedAtMillis while offline) and
+     * bounded by the exam's absolute deadline if configured.
+     */
+    fun computeServerAnchoredTimer(
+        durationMinutes: Int,
+        serverCreatedAtMillis: Long?,
+        fallbackStartedAtMillis: Long,
+        previouslyRecordedElapsedSec: Int,
+        deadlineAtMillis: Long,
+        nowMillis: Long = System.currentTimeMillis()
+    ): ServerTimerSnapshot {
+        val totalAllowedSec = (durationMinutes * 60).coerceAtLeast(60)
+        val anchorStart = when {
+            serverCreatedAtMillis != null && serverCreatedAtMillis > 0L -> serverCreatedAtMillis
+            fallbackStartedAtMillis > 0L -> fallbackStartedAtMillis
+            else -> nowMillis
+        }
+        val elapsedByClock = ((nowMillis - anchorStart) / 1000L).toInt().coerceAtLeast(0)
+        val safeElapsed = max(elapsedByClock, previouslyRecordedElapsedSec.coerceAtLeast(0))
+            .coerceAtMost(totalAllowedSec)
+
+        val remainingByDuration = (totalAllowedSec - safeElapsed).coerceAtLeast(0)
+        val remainingByDeadline = if (deadlineAtMillis > 0L) {
+            ((deadlineAtMillis - nowMillis) / 1000L).toInt().coerceAtLeast(0)
+        } else {
+            remainingByDuration
+        }
+        val effectiveRemaining = min(remainingByDuration, remainingByDeadline)
+        return ServerTimerSnapshot(
+            elapsedSeconds = safeElapsed,
+            remainingSeconds = effectiveRemaining,
+            expired = effectiveRemaining <= 0
+        )
+    }
 
     fun evaluate(
         exam: Examination,
         answerKey: ExamAnswerKey,
         responses: Map<String, String>
     ): EvaluationOutcome {
+        require(exam.questions.isNotEmpty()) {
+            "Cannot evaluate an empty examination paper (0 questions)."
+        }
+
         var correct = 0
         var wrong = 0
         var unattempted = 0
@@ -40,7 +116,7 @@ object EvaluationEngine {
         val analyses = mutableListOf<QuestionAnalysis>()
 
         exam.questions.forEach { q ->
-            val qMarks = if (q.marks > 0.0) q.marks else answerKey.marksPerQuestion
+            val qMarks = if (q.marks > 0.0) q.marks else answerKey.marksPerQuestion.coerceAtLeast(0.5)
             totalMarks += qMarks
             val rawStudent = responses[q.questionId]?.trim().orEmpty()
             val rawCorrect = answerKey.answers[q.questionId]?.trim().orEmpty()
@@ -104,7 +180,7 @@ object EvaluationEngine {
                         )
                     } else {
                         wrong++
-                        val deduction = answerKey.negativeMarks
+                        val deduction = answerKey.negativeMarks.coerceAtLeast(0.0)
                         obtainedMarks -= deduction
                         analyses.add(
                             QuestionAnalysis(
@@ -125,24 +201,68 @@ object EvaluationEngine {
             }
         }
 
-        val safeTotal = if (totalMarks > 0.0) totalMarks else max(exam.totalMarks, 1.0)
-        val rawPct = if (safeTotal > 0.0) (max(0.0, obtainedMarks) / safeTotal) * 100.0 else 0.0
-        val clampedPct = round(min(100.0, max(0.0, rawPct)) * 10.0) / 10.0
-        val passed = clampedPct >= answerKey.passingPercentage
+        val safeTotal = round(max(totalMarks, 0.5) * 100.0) / 100.0
+        val roundedObtained = round(obtainedMarks * 100.0) / 100.0
+        val pct = calculatePercentage(roundedObtained, safeTotal)
+        val passed = pct >= answerKey.passingPercentage
         val gradingStatus = if (pendingManual > 0) GradingStatus.PENDING_REVIEW else GradingStatus.FINALIZED
 
         return EvaluationOutcome(
-            totalQuestions = exam.questions.size.coerceAtLeast(1),
+            totalQuestions = exam.questions.size,
             correctCount = correct,
             wrongCount = wrong,
             unattemptedCount = unattempted,
             pendingManualCount = pendingManual,
-            totalMarks = round(safeTotal * 100.0) / 100.0,
-            obtainedMarks = round(obtainedMarks * 100.0) / 100.0,
-            percentage = clampedPct,
+            totalMarks = safeTotal,
+            obtainedMarks = roundedObtained,
+            percentage = pct,
             passed = passed,
             gradingStatus = gradingStatus,
             questionAnalyses = analyses
+        )
+    }
+
+    /**
+     * Deterministic recalculation when a teacher/admin grades a SHORT_ANSWER response.
+     * Uses the exact same formula and passing percentage as automatic evaluation.
+     */
+    fun recalculateAfterManualGrading(
+        result: ExamResult,
+        questionId: String,
+        awardedMarks: Double,
+        passingPercentage: Double
+    ): ManualGradingRecalculation {
+        val updatedAnalyses = result.questionAnalyses.map { qa ->
+            if (qa.questionId == questionId) {
+                val safeMarks = round(awardedMarks.coerceIn(0.0, qa.maxMarks) * 100.0) / 100.0
+                qa.copy(
+                    marksObtained = safeMarks,
+                    status = if (safeMarks > 0.0) AnswerStatus.CORRECT.name else AnswerStatus.WRONG.name,
+                    needsManualReview = false
+                )
+            } else {
+                qa
+            }
+        }
+
+        val correct = updatedAnalyses.count { it.statusEnum() == AnswerStatus.CORRECT }
+        val wrong = updatedAnalyses.count { it.statusEnum() == AnswerStatus.WRONG }
+        val unattempted = updatedAnalyses.count { it.statusEnum() == AnswerStatus.UNATTEMPTED }
+        val pending = updatedAnalyses.count { it.needsManualReview }
+        val totalObtained = round(updatedAnalyses.sumOf { it.marksObtained } * 100.0) / 100.0
+        val pct = calculatePercentage(totalObtained, result.totalMarks)
+        val newStatus = if (pending == 0) GradingStatus.FINALIZED else GradingStatus.PENDING_REVIEW
+
+        return ManualGradingRecalculation(
+            correctCount = correct,
+            wrongCount = wrong,
+            unattemptedCount = unattempted,
+            pendingManualCount = pending,
+            obtainedMarks = totalObtained,
+            percentage = pct,
+            passed = pct >= passingPercentage,
+            gradingStatus = newStatus,
+            updatedAnalyses = updatedAnalyses
         )
     }
 
@@ -165,7 +285,7 @@ object EvaluationEngine {
                 if (sNorm == cNorm) return true
                 // Also support matching option letter ("A") against option text or vice versa
                 val letterIdx = when (cNorm) {
-                    "A" -> 0; "B" -> 1; "C" -> 2; "D" -> 3; "E" -> 4; else -> -1
+                    "A" -> 0; "B" -> 1; "C" -> 2; "D" -> 3; "E" -> 4; "F" -> 5; else -> -1
                 }
                 if (letterIdx in options.indices && options[letterIdx].trim().equals(student.trim(), ignoreCase = true)) {
                     return true
@@ -191,9 +311,9 @@ object EvaluationEngine {
         val mins = (safe % 3600) / 60
         val secs = safe % 60
         return if (hrs > 0) {
-            String.format("%02d:%02d:%02d", hrs, mins, secs)
+            String.format(Locale.US, "%02d:%02d:%02d", hrs, mins, secs)
         } else {
-            String.format("%02d:%02d", mins, secs)
+            String.format(Locale.US, "%02d:%02d", mins, secs)
         }
     }
 }

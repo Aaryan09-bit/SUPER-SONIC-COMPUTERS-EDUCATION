@@ -17,6 +17,7 @@ import com.google.firebase.auth.FirebaseUser
 import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.WriteBatch
 import com.google.firebase.firestore.snapshots
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
@@ -171,8 +172,9 @@ class InstituteDirectoryRepository(
 
     // ==================== TEACHERS ====================
 
-    fun observeAllTeachers(): Flow<List<TeacherProfile>> =
+    fun observeAllTeachers(limit: Long = 100L): Flow<List<TeacherProfile>> =
         db.collection("teachers")
+            .limit(limit.coerceIn(1L, 500L))
             .snapshots()
             .map { snap ->
                 snap.toObjects(TeacherProfile::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
@@ -182,6 +184,7 @@ class InstituteDirectoryRepository(
     fun observeMyTeacherProfile(uid: String): Flow<TeacherProfile?> =
         db.collection("teachers")
             .whereEqualTo("linkedUid", uid)
+            .limit(1L)
             .snapshots()
             .map { snap ->
                 snap.toObjects(TeacherProfile::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
@@ -197,8 +200,18 @@ class InstituteDirectoryRepository(
         customPasscode: String? = null,
         demoRecord: Boolean = false
     ): Result<TeacherProfile> = try {
-        val teacherId = "tch_${shortId()}"
-        val code = (customCode?.takeIf { it.isNotBlank() } ?: "TCH-${Random.nextInt(1000, 9999)}").uppercase()
+        require(name.trim().isNotEmpty()) { "Teacher name is required." }
+        require(email.trim().contains("@")) { "A valid teacher email is required." }
+        val teacherId = if (demoRecord && !customCode.isNullOrBlank()) {
+            "tch_${customCode.trim().lowercase().replace(Regex("[^a-z0-9_]"), "_")}"
+        } else {
+            "tch_${shortId()}"
+        }
+        val code = resolveUniquePortalCode(
+            prefix = "TCH",
+            customCode = customCode,
+            allowOverwriteExisting = demoRecord
+        )
         val passcode = customPasscode?.takeIf { it.length >= 4 } ?: generatePasscode("SS")
 
         val teacherData = buildMap<String, Any> {
@@ -274,11 +287,22 @@ class InstituteDirectoryRepository(
             put("active", active)
             put("updatedAt", FieldValue.serverTimestamp())
         }
+        val teacherSnap = db.collection("teachers").document(teacherId).get().await()
+        val linkedUid = teacherSnap.getString("linkedUid").orEmpty()
         db.collection("teachers").document(teacherId).update(updates).await()
         if (teacherCode.isNotBlank()) {
-            db.collection("portal_claims").document(teacherCode).update(
-                mapOf("active" to active, "updatedAt" to FieldValue.serverTimestamp())
-            ).await()
+            runCatching {
+                db.collection("portal_claims").document(teacherCode).update(
+                    mapOf("active" to active, "updatedAt" to FieldValue.serverTimestamp())
+                ).await()
+            }
+        }
+        if (linkedUid.isNotBlank()) {
+            runCatching {
+                db.collection("users").document(linkedUid).update(
+                    mapOf("active" to active, "updatedAt" to FieldValue.serverTimestamp())
+                ).await()
+            }
         }
         logAudit(UserRole.ADMIN, "TEACHER_UPDATED", "teachers", teacherId, "Updated teacher $name (active=$active)")
         Result.success(Unit)
@@ -307,17 +331,19 @@ class InstituteDirectoryRepository(
 
     // ==================== STUDENTS ====================
 
-    fun observeAllStudents(): Flow<List<StudentProfile>> =
+    fun observeAllStudents(limit: Long = 150L): Flow<List<StudentProfile>> =
         db.collection("students")
+            .limit(limit.coerceIn(1L, 500L))
             .snapshots()
             .map { snap ->
                 snap.toObjects(StudentProfile::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
                     .sortedByDescending { it.createdAt?.seconds ?: 0L }
             }
 
-    fun observeTeacherStudents(teacherUid: String): Flow<List<StudentProfile>> =
+    fun observeTeacherStudents(teacherUid: String, limit: Long = 150L): Flow<List<StudentProfile>> =
         db.collection("students")
             .whereEqualTo("assignedTeacherUid", teacherUid)
+            .limit(limit.coerceIn(1L, 500L))
             .snapshots()
             .map { snap ->
                 snap.toObjects(StudentProfile::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
@@ -327,6 +353,7 @@ class InstituteDirectoryRepository(
     fun observeMyStudentProfile(uid: String): Flow<StudentProfile?> =
         db.collection("students")
             .whereEqualTo("linkedUid", uid)
+            .limit(1L)
             .snapshots()
             .map { snap ->
                 snap.toObjects(StudentProfile::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
@@ -345,8 +372,17 @@ class InstituteDirectoryRepository(
         customPasscode: String? = null,
         demoRecord: Boolean = false
     ): Result<StudentProfile> = try {
-        val studentId = "stu_${shortId()}"
-        val code = (customCode?.takeIf { it.isNotBlank() } ?: "STU-${Random.nextInt(1000, 9999)}").uppercase()
+        require(name.trim().isNotEmpty()) { "Student name is required." }
+        val studentId = if (demoRecord && !customCode.isNullOrBlank()) {
+            "stu_${customCode.trim().lowercase().replace(Regex("[^a-z0-9_]"), "_")}"
+        } else {
+            "stu_${shortId()}"
+        }
+        val code = resolveUniquePortalCode(
+            prefix = "STU",
+            customCode = customCode,
+            allowOverwriteExisting = demoRecord
+        )
         val passcode = customPasscode?.takeIf { it.length >= 4 } ?: generatePasscode("ST")
 
         val studentData = buildMap<String, Any> {
@@ -442,11 +478,28 @@ class InstituteDirectoryRepository(
             put("active", active)
             put("updatedAt", FieldValue.serverTimestamp())
         }
+        val studentSnap = db.collection("students").document(studentId).get().await()
+        val linkedUid = studentSnap.getString("linkedUid").orEmpty()
+        val prevTeacherId = studentSnap.getString("assignedTeacherId").orEmpty()
+        val prevTeacherUid = studentSnap.getString("assignedTeacherUid").orEmpty()
+
         db.collection("students").document(studentId).update(updates).await()
         if (studentCode.isNotBlank()) {
-            db.collection("portal_claims").document(studentCode).update(
-                mapOf("active" to active, "updatedAt" to FieldValue.serverTimestamp())
-            ).await()
+            runCatching {
+                db.collection("portal_claims").document(studentCode).update(
+                    mapOf("active" to active, "updatedAt" to FieldValue.serverTimestamp())
+                ).await()
+            }
+        }
+        if (linkedUid.isNotBlank()) {
+            runCatching {
+                db.collection("users").document(linkedUid).update(
+                    mapOf("active" to active, "updatedAt" to FieldValue.serverTimestamp())
+                ).await()
+            }
+        }
+        if (prevTeacherId != teacher?.id.orEmpty() || prevTeacherUid != teacher?.linkedUid.orEmpty()) {
+            cascadeStudentTeacherAssignment(studentId, teacher)
         }
         logAudit(UserRole.ADMIN, "STUDENT_UPDATED", "students", studentId, "Updated student $name")
         Result.success(Unit)
@@ -466,6 +519,7 @@ class InstituteDirectoryRepository(
                 "updatedAt" to FieldValue.serverTimestamp()
             )
         ).await()
+        cascadeStudentTeacherAssignment(student.id, newTeacher)
         logAudit(
             UserRole.ADMIN,
             "STUDENT_TRANSFERRED",
@@ -479,6 +533,93 @@ class InstituteDirectoryRepository(
     } catch (e: Exception) {
         handleFirestoreError(e, OperationType.UPDATE, "students/${student.id}")
         Result.failure(e)
+    }
+
+    /**
+     * Reconciles students whose assigned Teacher claimed their Google account AFTER the student
+     * was created/assigned, backfilling `assignedTeacherUid` on student records, exam attempts,
+     * and exam results so the Teacher dashboard immediately reflects all assigned students.
+     */
+    suspend fun reconcileTeacherAssignments(
+        teachers: List<TeacherProfile>,
+        students: List<StudentProfile>
+    ): Result<Int> = try {
+        val teacherById = teachers.filter { it.linkedUid.isNotBlank() }.associateBy { it.id }
+        val mismatched = students.filter { stu ->
+            val teacher = teacherById[stu.assignedTeacherId] ?: return@filter false
+            stu.assignedTeacherUid != teacher.linkedUid || stu.assignedTeacherName != teacher.name
+        }
+        if (mismatched.isEmpty()) return Result.success(0)
+
+        val ops = mutableListOf<(WriteBatch) -> Unit>()
+        mismatched.forEach { stu ->
+            val teacher = teacherById[stu.assignedTeacherId] ?: return@forEach
+            val ref = db.collection("students").document(stu.id)
+            ops += { b ->
+                b.update(
+                    ref,
+                    mapOf(
+                        "assignedTeacherUid" to teacher.linkedUid,
+                        "assignedTeacherName" to teacher.name,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                )
+            }
+        }
+        commitChunkedWrites(ops)
+        mismatched.forEach { stu ->
+            val teacher = teacherById[stu.assignedTeacherId] ?: return@forEach
+            cascadeStudentTeacherAssignment(stu.id, teacher)
+        }
+        Result.success(mismatched.size)
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        handleFirestoreError(e, OperationType.UPDATE, "students/reconcile")
+        Result.failure(e)
+    }
+
+    private suspend fun cascadeStudentTeacherAssignment(studentId: String, teacher: TeacherProfile?) {
+        val teacherId = teacher?.id.orEmpty()
+        val teacherUid = teacher?.linkedUid.orEmpty()
+        val teacherName = teacher?.name.orEmpty()
+
+        val ops = mutableListOf<(WriteBatch) -> Unit>()
+        val resultsSnap = runCatching {
+            db.collection("exam_results").whereEqualTo("studentId", studentId).get().await()
+        }.getOrNull()
+        resultsSnap?.documents?.forEach { doc ->
+            ops += { b ->
+                b.update(
+                    doc.reference,
+                    mapOf(
+                        "assignedTeacherId" to teacherId,
+                        "assignedTeacherUid" to teacherUid,
+                        "assignedTeacherName" to teacherName,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                )
+            }
+        }
+
+        val attemptsSnap = runCatching {
+            db.collection("exam_attempts").whereEqualTo("studentId", studentId).get().await()
+        }.getOrNull()
+        attemptsSnap?.documents?.forEach { doc ->
+            ops += { b ->
+                b.update(
+                    doc.reference,
+                    mapOf(
+                        "assignedTeacherUid" to teacherUid,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                )
+            }
+        }
+
+        if (ops.isNotEmpty()) {
+            commitChunkedWrites(ops)
+        }
     }
 
     suspend fun deleteStudent(student: StudentProfile): Result<Unit> = try {
@@ -499,22 +640,23 @@ class InstituteDirectoryRepository(
 
     // ==================== NOTIFICATIONS & AUDIT LOGS ====================
 
-    fun observeNotifications(uid: String): Flow<List<NotificationItem>> =
+    fun observeNotifications(uid: String, limit: Long = 60L): Flow<List<NotificationItem>> =
         db.collection("notifications")
             .whereEqualTo("recipientUid", uid)
+            .limit(limit.coerceIn(1L, 200L))
             .snapshots()
             .map { snap ->
                 snap.toObjects(NotificationItem::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
                     .sortedByDescending { it.createdAt?.seconds ?: 0L }
             }
 
-    fun observeAllNotificationsAdmin(): Flow<List<NotificationItem>> =
+    fun observeAllNotificationsAdmin(limit: Long = 60L): Flow<List<NotificationItem>> =
         db.collection("notifications")
+            .limit(limit.coerceIn(1L, 200L))
             .snapshots()
             .map { snap ->
                 snap.toObjects(NotificationItem::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
                     .sortedByDescending { it.createdAt?.seconds ?: 0L }
-                    .take(50)
             }
 
     suspend fun sendNotification(
@@ -557,13 +699,13 @@ class InstituteDirectoryRepository(
         Result.failure(e)
     }
 
-    fun observeAuditLogs(): Flow<List<AuditLog>> =
+    fun observeAuditLogs(limit: Long = 60L): Flow<List<AuditLog>> =
         db.collection("audit_logs")
+            .limit(limit.coerceIn(1L, 200L))
             .snapshots()
             .map { snap ->
                 snap.toObjects(AuditLog::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
                     .sortedByDescending { it.createdAt?.seconds ?: 0L }
-                    .take(60)
             }
 
     suspend fun logAudit(
@@ -592,6 +734,40 @@ class InstituteDirectoryRepository(
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.CREATE, "audit_logs")
+        }
+    }
+
+    private suspend fun resolveUniquePortalCode(
+        prefix: String,
+        customCode: String?,
+        allowOverwriteExisting: Boolean
+    ): String {
+        val trimmedCustom = customCode?.trim()?.uppercase()
+        if (!trimmedCustom.isNullOrBlank()) {
+            require(trimmedCustom.matches(Regex("^[A-Za-z0-9_\\-]{2,64}$"))) {
+                "Institute ID must be 2-64 letters, numbers, hyphens, or underscores."
+            }
+            if (!allowOverwriteExisting) {
+                val existing = db.collection("portal_claims").document(trimmedCustom).get().await()
+                if (existing.exists()) {
+                    throw IllegalArgumentException("Institute ID $trimmedCustom is already in use. Choose a different ID.")
+                }
+            }
+            return trimmedCustom
+        }
+        repeat(10) {
+            val candidate = "$prefix-${Random.nextInt(1000, 9999)}"
+            val existing = db.collection("portal_claims").document(candidate).get().await()
+            if (!existing.exists()) return candidate
+        }
+        return "$prefix-${shortId().take(6).uppercase()}"
+    }
+
+    private suspend fun commitChunkedWrites(ops: List<(WriteBatch) -> Unit>) {
+        ops.chunked(400).forEach { chunk ->
+            val batch = db.batch()
+            chunk.forEach { it(batch) }
+            batch.commit().await()
         }
     }
 

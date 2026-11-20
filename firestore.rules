@@ -527,12 +527,17 @@ service cloud.firestore {
                            incoming().studentUid == request.auth.uid &&
                            attemptId == incoming().examId + '_' + request.auth.uid &&
                            incoming().status == 'IN_PROGRESS' &&
-                           get(/databases/$(database)/documents/examinations/$(incoming().examId)).data.status == 'PUBLISHED'
+                           get(/databases/$(database)/documents/examinations/$(incoming().examId)).data.status == 'PUBLISHED' &&
+                           (
+                             get(/databases/$(database)/documents/examinations/$(incoming().examId)).data.assignedScope == 'ALL' ||
+                             request.auth.uid in get(/databases/$(database)/documents/examinations/$(incoming().examId)).data.assignedStudentUids
+                           )
                          )
                        );
       allow update: if isSignedIn() && isValidId(attemptId) && isValidExamAttempt(incoming()) &&
                        incoming().examId == existing().examId &&
                        incoming().studentUid == existing().studentUid &&
+                       incoming().startedAtMillis == existing().startedAtMillis &&
                        incoming().createdAt == existing().createdAt &&
                        (
                          isAdmin() ||

@@ -42,6 +42,7 @@ import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.OutlinedButton
@@ -70,7 +71,9 @@ import com.example.data.model.PdfPaper
 import com.example.data.model.QuestionType
 import com.example.ui.components.EmptyStateCard
 import com.example.ui.components.InstituteCard
+import com.example.ui.components.LoadingSkeletonList
 import com.example.ui.components.StatusPill
+import com.example.ui.components.rememberDebouncedText
 import com.example.ui.theme.BrandDarkBlue
 import com.example.ui.theme.BrandSurfaceTint
 import com.example.ui.theme.StatusError
@@ -101,16 +104,21 @@ fun AdminPapersBankScreen(
         String?, String, QuestionType, List<String>, List<String>, String,
         String, String, String, DifficultyLevel, Double, Boolean
     ) -> Unit,
-    onDeleteQuestion: (String) -> Unit
+    onDeleteQuestion: (String) -> Unit,
+    isLoadingQuestions: Boolean = false,
+    canLoadMoreQuestions: Boolean = false,
+    onLoadMoreQuestions: () -> Unit = {}
 ) {
     val context = LocalContext.current
     var selectedTab by remember { mutableIntStateOf(0) }
     var searchQuery by remember { mutableStateOf("") }
+    val debouncedQuery = rememberDebouncedText(searchQuery)
     var previewingSet by remember { mutableStateOf<BundledQuestionSet?>(null) }
     var editingQuestion by remember { mutableStateOf<BankQuestion?>(null) }
     var showAddQuestion by remember { mutableStateOf(false) }
 
     val importedPaperIds = remember(pdfPapers) { pdfPapers.map { it.id }.toSet() }
+    val uploadedFileNames = remember(pdfPapers) { pdfPapers.map { it.fileName.lowercase() }.toSet() }
 
     val pdfPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
@@ -149,11 +157,13 @@ fun AdminPapersBankScreen(
 
         when (selectedTab) {
             0 -> {
-                val filteredSets = bundledSets.filter {
-                    searchQuery.isBlank() ||
-                        it.title.contains(searchQuery, ignoreCase = true) ||
-                        it.primarySubject.contains(searchQuery, ignoreCase = true) ||
-                        it.rangeLabel.contains(searchQuery, ignoreCase = true)
+                val filteredSets = remember(bundledSets, debouncedQuery) {
+                    bundledSets.filter {
+                        debouncedQuery.isBlank() ||
+                            it.title.contains(debouncedQuery, ignoreCase = true) ||
+                            it.primarySubject.contains(debouncedQuery, ignoreCase = true) ||
+                            it.rangeLabel.contains(debouncedQuery, ignoreCase = true)
+                    }
                 }
                 OutlinedTextField(
                     value = searchQuery,
@@ -245,15 +255,47 @@ fun AdminPapersBankScreen(
                                     if (extractionState.extracting) {
                                         CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
                                         Spacer(Modifier.width(8.dp))
-                                        Text("Scanning PDF Pages with AI...")
+                                        Text(extractionState.progressLabel.ifBlank { "Scanning PDF Pages with AI..." })
                                     } else {
                                         Icon(Icons.Outlined.CloudUpload, contentDescription = null)
                                         Spacer(Modifier.width(8.dp))
-                                        Text("Select Question Paper PDF")
+                                        Text("Select Question Paper PDF (up to 25 MB)")
                                     }
                                 }
+                                if (extractionState.extracting) {
+                                    LinearProgressIndicator(
+                                        progress = { extractionState.progressFraction.coerceIn(0.05f, 1f) },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        color = BrandDarkBlue,
+                                        trackColor = BrandSurfaceTint
+                                    )
+                                    if (extractionState.totalPages > 0) {
+                                        Text(
+                                            text = "${extractionState.progressLabel} (${extractionState.pagesProcessed}/${extractionState.totalPages} pages)",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = BrandDarkBlue
+                                        )
+                                    }
+                                }
+                                if (extractionState.fileName.isNotBlank() && uploadedFileNames.contains(extractionState.fileName.lowercase())) {
+                                    Text(
+                                        text = "Note: '${extractionState.fileName}' was previously uploaded. Saving will deduplicate and update matching questions safely.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = StatusWarning
+                                    )
+                                }
                                 extractionState.error?.let { err ->
-                                    Text(err, style = MaterialTheme.typography.bodySmall, color = StatusError)
+                                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        Text(err, style = MaterialTheme.typography.bodySmall, color = StatusError)
+                                        OutlinedButton(
+                                            onClick = { showAddQuestion = true },
+                                            modifier = Modifier.testTag("pdf_fallback_manual_question_button")
+                                        ) {
+                                            Icon(Icons.Outlined.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                                            Spacer(Modifier.width(6.dp))
+                                            Text("Add Questions Manually Instead")
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -381,11 +423,13 @@ fun AdminPapersBankScreen(
             }
 
             else -> {
-                val filteredBank = questions.filter {
-                    searchQuery.isBlank() ||
-                        it.questionText.contains(searchQuery, ignoreCase = true) ||
-                        it.subject.contains(searchQuery, ignoreCase = true) ||
-                        it.chapter.contains(searchQuery, ignoreCase = true)
+                val filteredBank = remember(questions, debouncedQuery) {
+                    questions.filter {
+                        debouncedQuery.isBlank() ||
+                            it.questionText.contains(debouncedQuery, ignoreCase = true) ||
+                            it.subject.contains(debouncedQuery, ignoreCase = true) ||
+                            it.chapter.contains(debouncedQuery, ignoreCase = true)
+                    }
                 }
                 Row(
                     modifier = Modifier
@@ -413,71 +457,87 @@ fun AdminPapersBankScreen(
                         Text("New Q")
                     }
                 }
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    if (filteredBank.isEmpty()) {
-                        item {
-                            EmptyStateCard(
-                                icon = Icons.Outlined.Quiz,
-                                title = "Question Bank Empty",
-                                subtitle = "Import any of the 42 pre-loaded PDF sets, upload a PDF via AI OCR, or create questions manually."
-                            )
-                        }
-                    } else {
-                        items(filteredBank.take(120), key = { it.id }) { q ->
-                            InstituteCard(modifier = Modifier.fillMaxWidth()) {
-                                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                            StatusPill(q.subject, BrandDarkBlue, BrandSurfaceTint)
-                                            StatusPill(q.typeEnum().name, StatusInfo, StatusInfoContainer)
-                                        }
-                                        StatusPill(
-                                            text = if (q.answerApproved && q.correctAnswers.isNotEmpty()) "Key: ${q.correctAnswers.joinToString(",")}" else "Key Missing",
-                                            textColor = if (q.answerApproved && q.correctAnswers.isNotEmpty()) StatusSuccess else StatusWarning,
-                                            backgroundColor = if (q.answerApproved && q.correctAnswers.isNotEmpty()) StatusSuccessContainer else StatusWarningContainer
-                                        )
-                                    }
-                                    Text(q.questionText, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-                                    if (q.options.isNotEmpty()) {
-                                        val letters = listOf("A", "B", "C", "D", "E", "F")
-                                        Text(
-                                            q.options.mapIndexed { i, o -> "(${letters.getOrElse(i) { "${i + 1}" }}) $o" }.joinToString("  •  "),
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    }
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Text(
-                                            "${q.difficultyEnum().label} • ${q.marks} marks • ${q.chapter.ifBlank { "General" }}",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                        Row {
-                                            IconButton(onClick = { editingQuestion = q }) {
-                                                Icon(Icons.Outlined.Edit, contentDescription = "Edit Question")
+                if (isLoadingQuestions && questions.isEmpty()) {
+                    LoadingSkeletonList(cardCount = 4)
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        if (filteredBank.isEmpty()) {
+                            item {
+                                EmptyStateCard(
+                                    icon = Icons.Outlined.Quiz,
+                                    title = "Question Bank Empty",
+                                    subtitle = "Import any of the 42 pre-loaded PDF sets, upload a PDF via AI OCR, or create questions manually."
+                                )
+                            }
+                        } else {
+                            items(filteredBank, key = { it.id }) { q ->
+                                InstituteCard(modifier = Modifier.fillMaxWidth()) {
+                                    Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                                StatusPill(q.subject, BrandDarkBlue, BrandSurfaceTint)
+                                                StatusPill(q.typeEnum().name, StatusInfo, StatusInfoContainer)
                                             }
-                                            IconButton(onClick = { onDeleteQuestion(q.id) }) {
-                                                Icon(Icons.Outlined.Delete, contentDescription = "Delete Question", tint = StatusError)
+                                            StatusPill(
+                                                text = if (q.answerApproved && q.correctAnswers.isNotEmpty()) "Key: ${q.correctAnswers.joinToString(",")}" else "Key Missing",
+                                                textColor = if (q.answerApproved && q.correctAnswers.isNotEmpty()) StatusSuccess else StatusWarning,
+                                                backgroundColor = if (q.answerApproved && q.correctAnswers.isNotEmpty()) StatusSuccessContainer else StatusWarningContainer
+                                            )
+                                        }
+                                        Text(q.questionText, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                                        if (q.options.isNotEmpty()) {
+                                            val letters = listOf("A", "B", "C", "D", "E", "F")
+                                            Text(
+                                                q.options.mapIndexed { i, o -> "(${letters.getOrElse(i) { "${i + 1}" }}) $o" }.joinToString("  •  "),
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                "${q.difficultyEnum().label} • ${q.marks} marks • ${q.chapter.ifBlank { "General" }}",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                            Row {
+                                                IconButton(onClick = { editingQuestion = q }) {
+                                                    Icon(Icons.Outlined.Edit, contentDescription = "Edit Question")
+                                                }
+                                                IconButton(onClick = { onDeleteQuestion(q.id) }) {
+                                                    Icon(Icons.Outlined.Delete, contentDescription = "Delete Question", tint = StatusError)
+                                                }
                                             }
                                         }
                                     }
                                 }
                             }
+                            if (canLoadMoreQuestions) {
+                                item {
+                                    OutlinedButton(
+                                        onClick = onLoadMoreQuestions,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .testTag("load_more_questions_button")
+                                    ) {
+                                        Text("Load More Questions")
+                                    }
+                                }
+                            }
                         }
+                        item { Spacer(Modifier.height(24.dp)) }
                     }
-                    item { Spacer(Modifier.height(24.dp)) }
                 }
             }
         }

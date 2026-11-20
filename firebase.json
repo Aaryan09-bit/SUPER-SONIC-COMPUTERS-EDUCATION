@@ -2,7 +2,8 @@
   "firestore": [
     {
       "database": "ai-studio-android-superson-111dc257-4589-4f9c-a068-48072480f73a",
-      "rules": "firestore.rules"
+      "rules": "firestore.rules",
+      "indexes": "firestore.indexes.json"
     }
   ],
   "emulators": {

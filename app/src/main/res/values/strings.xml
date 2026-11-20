@@ -11,4 +11,12 @@
     <string name="error_no_google_account">No Google account found on this device. Please add a Google account in device settings.</string>
     <string name="export_pdf_report">Export PDF Report</string>
     <string name="export_csv_report">Export CSV / Excel</string>
+    <string name="portal_selector_heading">Choose Your Login Portal</string>
+    <string name="portal_selector_subheading">Select your role to continue to a dedicated, secure sign-in screen.</string>
+    <string name="admin_login_title">Admin Login</string>
+    <string name="teacher_login_title">Teacher Login</string>
+    <string name="student_login_title">Student Login</string>
+    <string name="back_to_portals">Back to Portals</string>
+    <string name="switch_portal_prompt">Need a different portal?</string>
+    <string name="loading_workspace">Loading Super Sonic Computers Education…</string>
 </resources>
